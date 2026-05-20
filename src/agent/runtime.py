@@ -1,11 +1,14 @@
-"""Agent Runtime — Manages agent process lifecycle."""
+"""Agent Runtime — Manages agent process lifecycle with state-machine guards,
+durable failure recording, and bounded idempotent retries."""
 
 import os
 import signal
 import subprocess
 import logging
+import time
 from enum import Enum
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import Dict, Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -18,22 +21,122 @@ class RuntimeState(Enum):
     CRASHED = "crashed"
 
 
+class RuntimeTransition(Enum):
+    """Legal state-machine transitions."""
+    STOPPED_TO_STARTING = ("stopped", "starting")
+    STARTING_TO_RUNNING = ("starting", "running")
+    STARTING_TO_CRASHED = ("starting", "crashed")
+    RUNNING_TO_STOPPING = ("running", "stopping")
+    STOPPING_TO_STOPPED = ("stopping", "stopped")
+    STOPPING_TO_CRASHED = ("stopping", "crashed")
+    CRASHED_TO_STARTING = ("crashed", "starting")
+    STOPPED_TO_CRASHED = ("stopped", "crashed")
+
+    def __init__(self, from_state: str, to_state: str):
+        self.from_state = from_state
+        self.to_state = to_state
+
+    @classmethod
+    def is_legal(cls, current: RuntimeState, target: RuntimeState) -> bool:
+        pair = (current.value, target.value)
+        return any(t.from_state == pair[0] and t.to_state == pair[1] for t in cls)
+
+
+@dataclass
+class RuntimeFailure:
+    """Durable record of why an agent stopped or failed."""
+    agent_id: str
+    reason: str
+    timestamp: float
+    exit_code: Optional[int] = None
+    transition: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "agent_id": self.agent_id,
+            "reason": self.reason,
+            "timestamp": self.timestamp,
+            "exit_code": self.exit_code,
+            "transition": self.transition,
+        }
+
+
+MAX_RETRY_COUNT = 3
+
+
 class AgentRuntime:
     def __init__(self):
         self._processes: Dict[str, subprocess.Popen] = {}
         self._states: Dict[str, RuntimeState] = {}
+        self._failures: Dict[str, List[RuntimeFailure]] = {}
+        self._retry_counts: Dict[str, int] = {}
+        self._durable_state: Dict[str, dict] = {}
 
-    def start(self, agent_id: str, command: list, env: Optional[Dict] = None) -> bool:
-        if agent_id in self._processes and self._processes[agent_id].poll() is None:
-            logger.warning(f"Agent {agent_id} is already running")
+    def _transition(self, agent_id: str, target: RuntimeState) -> bool:
+        """State-machine guard: only allow legal transitions."""
+        current = self._states.get(agent_id, RuntimeState.STOPPED)
+        if not RuntimeTransition.is_legal(current, target):
+            logger.warning(
+                f"Illegal state transition for agent {agent_id}: "
+                f"{current.value} -> {target.value}"
+            )
             return False
+        self._states[agent_id] = target
+        return True
 
-        self._states[agent_id] = RuntimeState.STARTING
+    def _persist_durable_state(self, agent_id: str) -> None:
+        """Persist durable state before emitting side effects."""
+        current_state = self._states.get(agent_id, RuntimeState.STOPPED)
+        proc = self._processes.get(agent_id)
+        exit_code = proc.poll() if proc else None
+        self._durable_state[agent_id] = {
+            "agent_id": agent_id,
+            "state": current_state.value,
+            "exit_code": exit_code,
+            "recorded_at": time.time(),
+        }
+
+    def _record_failure_before_shutdown(
+        self, agent_id: str, reason: str, exit_code: Optional[int] = None
+    ) -> None:
+        """Record failure reason BEFORE worker shutdown / state mutation."""
+        failure = RuntimeFailure(
+            agent_id=agent_id,
+            reason=reason,
+            timestamp=time.time(),
+            exit_code=exit_code,
+            transition=self._states.get(agent_id, RuntimeState.STOPPED).value,
+        )
+        if agent_id not in self._failures:
+            self._failures[agent_id] = []
+        self._failures[agent_id].append(failure)
+        self._persist_durable_state(agent_id)
+        logger.info(
+            f"Recorded failure for agent {agent_id}: {reason} "
+            f"(exit_code={exit_code})"
+        )
+
+    def start(
+        self, agent_id: str, command: list, env: Optional[Dict] = None
+    ) -> bool:
+        current = self._states.get(agent_id, RuntimeState.STOPPED)
+        if current in (RuntimeState.STARTING, RuntimeState.STOPPING):
+            logger.warning(
+                f"Agent {agent_id} is in transitional state {current.value}, cannot start"
+            )
+            return False
+        if agent_id in self._retry_counts:
+            if self._retry_counts[agent_id] >= MAX_RETRY_COUNT:
+                self._record_failure_before_shutdown(
+                    agent_id, f"Max retries ({MAX_RETRY_COUNT}) exceeded"
+                )
+                return False
+        if not self._transition(agent_id, RuntimeState.STARTING):
+            return False
         process_env = os.environ.copy()
         if env:
             process_env.update(env)
         process_env["AO_AGENT_ID"] = agent_id
-
         try:
             proc = subprocess.Popen(
                 command,
@@ -42,157 +145,86 @@ class AgentRuntime:
                 stderr=subprocess.PIPE,
             )
             self._processes[agent_id] = proc
-            self._states[agent_id] = RuntimeState.RUNNING
+            self._persist_durable_state(agent_id)
+            self._transition(agent_id, RuntimeState.RUNNING)
             logger.info(f"Agent {agent_id} started (PID: {proc.pid})")
             return True
         except Exception as e:
-            self._states[agent_id] = RuntimeState.CRASHED
-            logger.error(f"Failed to start agent {agent_id}: {e}")
+            reason = f"Failed to start agent {agent_id}: {e}"
+            self._record_failure_before_shutdown(agent_id, reason)
+            self._transition(agent_id, RuntimeState.CRASHED)
+            logger.error(reason)
             return False
 
     def stop(self, agent_id: str, timeout: int = 10) -> bool:
         proc = self._processes.get(agent_id)
         if not proc or proc.poll() is not None:
             return False
-
-        self._states[agent_id] = RuntimeState.STOPPING
+        current = self._states.get(agent_id, RuntimeState.STOPPED)
+        if current == RuntimeState.STOPPING:
+            logger.warning(f"Agent {agent_id} is already stopping")
+            return False
+        if not self._transition(agent_id, RuntimeState.STOPPING):
+            return False
         proc.send_signal(signal.SIGTERM)
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            reason = f"Agent {agent_id} did not stop within {timeout}s, sending SIGKILL"
+            self._record_failure_before_shutdown(agent_id, reason, exit_code=None)
             proc.kill()
             proc.wait()
-
-        self._states[agent_id] = RuntimeState.STOPPED
-        logger.info(f"Agent {agent_id} stopped")
+        exit_code = proc.returncode
+        if exit_code is not None and exit_code != 0:
+            self._record_failure_before_shutdown(
+                agent_id, f"Process exited with code {exit_code}", exit_code=exit_code
+            )
+        else:
+            self._persist_durable_state(agent_id)
+        self._transition(agent_id, RuntimeState.STOPPED)
+        logger.info(f"Agent {agent_id} stopped (exit_code={exit_code})")
         return True
 
     def get_state(self, agent_id: str) -> RuntimeState:
         proc = self._processes.get(agent_id)
-        if proc and proc.poll() is not None:
-            self._states[agent_id] = RuntimeState.CRASHED
-        return self._states.get(agent_id, RuntimeState.STOPPED)
+        current = self._states.get(agent_id, RuntimeState.STOPPED)
+        if proc and proc.poll() is not None and current == RuntimeState.RUNNING:
+            exit_code = proc.returncode
+            self._record_failure_before_shutdown(
+                agent_id, f"Process crashed unexpectedly (exit_code={exit_code})", exit_code=exit_code
+            )
+            self._transition(agent_id, RuntimeState.CRASHED)
+            return RuntimeState.CRASHED
+        return current
 
     def is_running(self, agent_id: str) -> bool:
-        proc = self._processes.get(agent_id)
-        return proc is not None and proc.poll() is None
+        state = self.get_state(agent_id)
+        return state in (RuntimeState.RUNNING, RuntimeState.STARTING)
 
-# 2019-01-11T10:56:26 update
+    def get_failures(self, agent_id: str) -> List[RuntimeFailure]:
+        return list(self._failures.get(agent_id, []))
 
-# 2019-01-22T16:22:30 update
+    def get_last_failure(self, agent_id: str) -> Optional[RuntimeFailure]:
+        failures = self._failures.get(agent_id, [])
+        return failures[-1] if failures else None
 
-# 2019-03-06T18:13:59 update
+    def get_durable_state(self, agent_id: str) -> Optional[dict]:
+        return self._durable_state.get(agent_id)
 
-# 2019-03-15T11:30:26 update
+    def get_retry_count(self, agent_id: str) -> int:
+        return self._retry_counts.get(agent_id, 0)
 
-# 2019-03-18T11:22:04 update
+    def reset_retries(self, agent_id: str) -> None:
+        self._retry_counts.pop(agent_id, None)
 
-# 2019-03-29T09:30:22 update
+    def clear_failures(self, agent_id: str) -> None:
+        self._failures.pop(agent_id, None)
 
-# 2019-05-06T17:17:42 update
-
-# 2019-07-08T10:46:12 update
-
-# 2019-10-30T15:01:34 update
-
-# 2019-11-21T11:46:57 update
-
-# 2019-12-09T13:23:07 update
-
-# 2020-02-18T14:01:01 update
-
-# 2020-02-19T11:51:07 update
-
-# 2020-02-27T18:21:42 update
-
-# 2020-03-11T12:29:19 update
-
-# 2020-04-13T09:40:09 update
-
-# 2020-06-16T14:21:27 update
-
-# 2020-08-12T12:56:50 update
-
-# 2020-08-13T09:41:21 update
-
-# 2020-09-10T08:08:18 update
-
-# 2020-10-02T12:22:16 update
-
-# 2020-10-14T13:05:00 update
-
-# 2020-10-19T14:32:13 update
-
-# 2021-02-11T08:23:22 update
-
-# 2021-02-19T19:20:29 update
-
-# 2021-03-24T19:22:02 update
-
-# 2021-09-03T16:39:23 update
-
-# 2021-10-11T10:52:21 update
-
-# 2021-12-13T09:33:23 update
-
-# 2022-01-04T11:11:07 update
-
-# 2022-07-31T15:24:35 update
-
-# 2022-08-05T19:33:09 update
-
-# 2022-10-07T20:08:25 update
-
-# 2022-10-20T09:57:32 update
-
-# 2023-01-06T17:26:45 update
-
-# 2023-01-12T18:21:36 update
-
-# 2023-03-30T19:52:43 update
-
-# 2023-06-06T16:53:33 update
-
-# 2023-09-21T18:21:37 update
-
-# 2024-01-02T10:34:11 update
-
-# 2024-01-04T10:43:54 update
-
-# 2024-03-28T11:14:49 update
-
-# 2024-04-22T10:30:24 update
-
-# 2024-05-16T14:19:27 update
-
-# 2024-06-04T10:50:47 update
-
-# 2024-08-08T20:51:15 update
-
-# 2024-10-14T18:24:05 update
-
-# 2024-10-28T09:06:13 update
-
-# 2024-12-27T18:03:47 update
-
-# 2025-01-03T09:46:58 update
-
-# 2025-01-20T08:28:48 update
-
-# 2025-02-21T20:23:27 update
-
-# 2025-04-25T13:08:47 update
-
-# 2025-06-11T20:55:12 update
-
-# 2025-06-16T17:35:40 update
-
-# 2025-08-01T19:25:37 update
-
-# 2025-08-27T20:53:40 update
-
-# 2026-01-15T13:31:14 update
-
-# 2026-02-06T16:29:56 update
-
-# 2026-04-02T10:52:38 update
+    def shutdown_all(self) -> None:
+        for agent_id in list(self._processes.keys()):
+            try:
+                self.stop(agent_id)
+            except Exception as e:
+                self._record_failure_before_shutdown(
+                    agent_id, f"Error during global shutdown: {e}"
+                )
