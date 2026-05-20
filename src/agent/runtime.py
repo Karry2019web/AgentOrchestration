@@ -70,7 +70,11 @@ class AgentRuntime:
     def get_state(self, agent_id: str) -> RuntimeState:
         proc = self._processes.get(agent_id)
         if proc and proc.poll() is not None:
-            self._states[agent_id] = RuntimeState.CRASHED
+            exit_code = proc.poll()
+            if exit_code == 0:
+                self._states[agent_id] = RuntimeState.STOPPED
+            else:
+                self._states[agent_id] = RuntimeState.CRASHED
         return self._states.get(agent_id, RuntimeState.STOPPED)
 
     def is_running(self, agent_id: str) -> bool:
