@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional
 
 from src.agent import AgentRegistry, AgentStatus
+from src.orchestrator.event_store import EventRetentionStore, EventSeverity
 from src.orchestrator.scheduler import TaskScheduler
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,9 @@ class OrchestrationEngine:
             "on_error": [],
             "on_complete": [],
         }
+        from src.orchestrator.event_store import EventRetentionStore, EventSeverity
+        self.event_store = EventRetentionStore()
+        self._event_severity = EventSeverity
 
     def register_hook(self, event: str, callback: Callable) -> None:
         if event in self._hooks:
@@ -47,6 +51,15 @@ class OrchestrationEngine:
         agent_id = task["target_agent"]
         logger.info(f"Executing task {task_id} on agent {agent_id}")
 
+        self.event_store.write_event(
+            event_id=task_id,
+            source=f"engine/{agent_id}",
+            event_type="task.started",
+            payload={"task_id": task_id, "agent_id": agent_id},
+            severity=self._event_severity.INFO,
+            audit=True,
+        )
+
         for hook in self._hooks["pre_execute"]:
             await hook(task)
 
@@ -65,10 +78,26 @@ class OrchestrationEngine:
             for hook in self._hooks["post_execute"]:
                 await hook(task, result)
 
+            self.event_store.write_event(
+                event_id=task_id,
+                source=f"engine/{agent_id}",
+                event_type="task.completed",
+                payload={"task_id": task_id, "agent_id": agent_id, "result": str(result)},
+                severity=self._event_severity.INFO,
+                audit=True,
+            )
             logger.info(f"Task {task_id} completed successfully")
 
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}")
+            self.event_store.write_event(
+                event_id=task_id,
+                source=f"engine/{agent_id}",
+                event_type="task.failed",
+                payload={"task_id": task_id, "agent_id": agent_id, "error": str(e)},
+                severity=self._event_severity.ERROR,
+                audit=True,
+            )
             for hook in self._hooks["on_error"]:
                 await hook(task, e)
 
