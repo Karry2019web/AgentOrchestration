@@ -2,10 +2,11 @@
 
 import time
 import logging
+import traceback
 from typing import Callable
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import Response, JSONResponse
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,36 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         duration = time.time() - start
         logger.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s")
         return response
+
+
+class ErrorSanitizationMiddleware(BaseHTTPMiddleware):
+    """Sanitizes exception detail before JSON serialization.
+
+    Catches unhandled exceptions raised during request processing and returns a
+    generic 500 response, logging the full traceback server-side for debugging.
+    Sets X-Error-Sanitized header to distinguish sanitized from normal responses.
+    Cleans up request-local state in a finally block to prevent cross-request leaks.
+    """
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        try:
+            response = await call_next(request)
+            return response
+        except Exception as exc:
+            logger.error(
+                "Unhandled exception processing %s %s: %s",
+                request.method, request.url.path,
+                "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            )
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Internal server error"},
+                headers={"X-Error-Sanitized": "true"},
+            )
+        finally:
+            # Clear any request-local state to prevent cross-request leaks
+            if hasattr(request.state, "_sanitization_context"):
+                del request.state._sanitization_context
 
 # 2019-03-01T18:35:19 update
 
@@ -104,7 +135,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
 # 2022-04-21T14:53:01 update
 
-# 2022-06-30T08:37:32 update
+# 2022-06-30T08:37:28 update
 
 # 2022-07-06T10:44:45 update
 
@@ -177,3 +208,4 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 # 2026-03-27T12:58:53 update
 
 # 2026-05-12T17:19:36 update
+
