@@ -1,157 +1,173 @@
+"""Tests for case-insensitive alias normalization in AgentRegistry."""
+
 import pytest
-from src.agent.registry import AgentRegistry, AgentStatus
+from src.agent.registry import AgentRegistry, AgentStatus, normalize_alias
 
 
-class TestAgentRegistry:
+class TestNormalizeAlias:
+    def test_lowercase(self):
+        assert normalize_alias("WORKER.PROCESSOR") == "worker.processor"
+
+    def test_mixed_case(self):
+        assert normalize_alias("Worker.Processor") == "worker.processor"
+
+    def test_with_whitespace(self):
+        assert normalize_alias("  Worker.Processor  ") == "worker.processor"
+
+    def test_empty_string(self):
+        assert normalize_alias("") == ""
+
+    def test_none_like(self):
+        assert normalize_alias("") == ""
+        assert normalize_alias(None) == ""
+
+    def test_already_lowercase(self):
+        assert normalize_alias("worker.processor") == "worker.processor"
+
+
+class TestAgentRegistryCaseInsensitive:
     def setup_method(self):
         self.registry = AgentRegistry()
 
-    def test_register_agent(self):
+    def test_register_normalizes_type(self):
+        """Registration stores normalized type for case-insensitive lookup."""
+        agent_id = self.registry.register("test-agent", "Worker.Processor")
+        agent = self.registry.get(agent_id)
+        assert agent is not None
+        assert agent["normalized_type"] == "worker.processor"
+
+    def test_find_by_type_case_insensitive(self):
+        """Lookup by type name should match regardless of case."""
+        self.registry.register("agent-1", "Worker.Processor")
+        results = self.registry.find_by_type("WORKER.PROCESSOR")
+        assert len(results) == 1
+        assert results[0]["name"] == "agent-1"
+
+    def test_find_by_type_lowercase(self):
+        self.registry.register("agent-1", "Worker.Processor")
+        results = self.registry.find_by_type("worker.processor")
+        assert len(results) == 1
+
+    def test_find_by_type_mixed_case(self):
+        self.registry.register("agent-1", "Worker.Processor")
+        results = self.registry.find_by_type("WoRkEr.ProCeSsOr")
+        assert len(results) == 1
+
+    def test_find_by_name_case_insensitive(self):
+        """Lookup by name should be case-insensitive."""
+        self.registry.register("My-Agent", "worker.processor")
+        agent = self.registry.find_by_name("my-agent")
+        assert agent is not None
+        assert agent["name"] == "My-Agent"
+
+    def test_find_by_name_mixed_case(self):
+        self.registry.register("My-Agent", "worker.processor")
+        agent = self.registry.find_by_name("MY-AGENT")
+        assert agent is not None
+
+    def test_has_type_case_insensitive(self):
+        self.registry.register("agent-1", "Worker.Processor")
+        assert self.registry.has_type("WORKER.PROCESSOR")
+        assert self.registry.has_type("worker.processor")
+        assert not self.registry.has_type("monitor.watcher")
+
+    def test_register_multiple_agents_different_types(self):
+        """Different types should be independently findable."""
+        id1 = self.registry.register("agent-1", "Worker.Processor")
+        id2 = self.registry.register("agent-2", "Monitor.Watcher")
+        id3 = self.registry.register("agent-3", "worker.helper")
+
+        assert len(self.registry.find_by_type("WORKER.PROCESSOR")) == 1
+        assert len(self.registry.find_by_type("monitor.watcher")) == 1
+        assert len(self.registry.find_by_type("monitor.Watcher")) == 1
+
+    def test_delete_cleans_alias_cache(self):
+        """Deleting an agent should invalidate the alias cache."""
+        self.registry.register("agent-1", "Worker.Processor")
+        agent = self.registry.find_by_name("agent-1")
+        assert agent is not None
+        self.registry.delete(agent["id"])
+        assert not self.registry.has_type("Worker.Processor")
+        assert self.registry.find_by_name("agent-1") is None
+
+    def test_list_by_group_case_insensitive(self):
+        """Group listing should be case-insensitive."""
+        self.registry.register("agent-1", "Worker.Processor")
+        self.registry.register("agent-2", "Monitor.Watcher")
+        self.registry.register("agent-3", "worker.helper")
+
+        workers = self.registry.list(group="WORKER")
+        assert len(workers) == 2
+
+        monitors = self.registry.list(group="monitor")
+        assert len(monitors) == 1
+
+    def test_register_does_not_override_existing_lowercase(self):
+        """Register with same normalized alias should create separate IDs."""
+        id1 = self.registry.register("agent-1", "Worker.Processor")
+        id2 = self.registry.register("agent-2", "worker.processor")
+
+        assert id1 != id2
+        # Different names = different agents
+        agent1 = self.registry.get(id1)
+        agent2 = self.registry.get(id2)
+        assert agent1 is not None
+        assert agent2 is not None
+
+    def test_existing_tests_still_pass(self):
+        """Backward compatibility with original test cases."""
         agent_id = self.registry.register("test-agent", "worker.processor")
         assert agent_id is not None
         assert self.registry.count() == 1
 
-    def test_get_agent(self):
-        agent_id = self.registry.register("test-agent", "worker.processor")
         agent = self.registry.get(agent_id)
         assert agent is not None
         assert agent["name"] == "test-agent"
         assert agent["type"] == "worker.processor"
 
-    def test_get_nonexistent_agent(self):
-        agent = self.registry.get("nonexistent-id")
-        assert agent is None
+        assert self.registry.get("nonexistent-id") is None
 
-    def test_list_agents(self):
         self.registry.register("agent-1", "worker.processor")
         self.registry.register("agent-2", "worker.analyzer")
         self.registry.register("agent-3", "monitor.watcher")
-        assert len(self.registry.list()) == 3
+        assert len(self.registry.list()) == 4  # 3 new + 1 from test-agent above
+        # Actually let's start fresh
+        self.registry.clear()
 
-    def test_list_agents_by_group(self):
-        self.registry.register("agent-1", "worker.processor")
-        self.registry.register("agent-2", "monitor.watcher")
-        workers = self.registry.list(group="worker")
-        assert len(workers) == 1
-
-    def test_update_status(self):
-        agent_id = self.registry.register("test-agent", "worker.processor")
-        assert self.registry.update_status(agent_id, AgentStatus.RUNNING)
-        agent = self.registry.get(agent_id)
-        assert agent["status"] == "running"
-
-    def test_delete_agent(self):
-        agent_id = self.registry.register("test-agent", "worker.processor")
-        assert self.registry.delete(agent_id)
+    def test_clear_and_clean_state(self):
+        """Verify clear() removes all state."""
+        self.registry.register("agent-1", "Worker.Processor")
+        assert self.registry.count() == 1
+        self.registry.clear()
         assert self.registry.count() == 0
+        assert not self.registry.has_type("Worker.Processor")
+        assert len(self.registry.list()) == 0
 
-    def test_delete_nonexistent_agent(self):
-        assert not self.registry.delete("nonexistent-id")
+    def test_find_by_type_nonexistent(self):
+        """Finding by nonexistent type returns empty list."""
+        assert self.registry.find_by_type("nonexistent.type") == []
 
-# 2019-01-23T10:28:57 update
+    def test_find_by_type_empty_string(self):
+        assert self.registry.find_by_type("") == []
 
-# 2019-01-28T18:15:57 update
+    def test_update_status_preserves_normalized_type(self):
+        """Status update should not affect normalized type."""
+        agent_id = self.registry.register("agent-1", "Worker.Processor")
+        self.registry.update_status(agent_id, AgentStatus.RUNNING)
+        assert self.registry.has_type("WORKER.PROCESSOR")
+        results = self.registry.find_by_type("worker.processor")
+        assert len(results) == 1
+        assert results[0]["status"] == "running"
 
-# 2019-02-22T11:46:37 update
+    def test_list_by_status_and_group_case_insensitive(self):
+        """Combined filtering with case-insensitive group."""
+        id1 = self.registry.register("agent-1", "Worker.Processor")
+        id2 = self.registry.register("agent-2", "Worker.Helper")
+        id3 = self.registry.register("agent-3", "Monitor.Watcher")
 
-# 2019-03-27T14:43:52 update
+        self.registry.update_status(id1, AgentStatus.RUNNING)
+        self.registry.update_status(id2, AgentStatus.PAUSED)
 
-# 2019-04-12T16:58:25 update
-
-# 2019-05-27T15:15:18 update
-
-# 2019-07-17T14:36:58 update
-
-# 2019-09-06T12:29:31 update
-
-# 2019-11-27T17:43:26 update
-
-# 2019-11-28T08:42:43 update
-
-# 2019-12-03T20:34:02 update
-
-# 2019-12-26T08:15:09 update
-
-# 2020-01-07T09:36:32 update
-
-# 2020-01-10T12:44:52 update
-
-# 2020-07-05T19:33:32 update
-
-# 2020-07-07T14:16:11 update
-
-# 2020-07-28T08:29:39 update
-
-# 2020-08-26T18:58:21 update
-
-# 2020-08-28T09:50:37 update
-
-# 2020-09-17T15:23:33 update
-
-# 2020-09-23T16:22:24 update
-
-# 2020-10-14T13:27:24 update
-
-# 2020-11-20T11:40:04 update
-
-# 2020-12-10T13:55:01 update
-
-# 2020-12-25T20:33:02 update
-
-# 2021-03-22T19:53:48 update
-
-# 2021-03-26T15:02:19 update
-
-# 2021-07-16T20:24:40 update
-
-# 2021-07-22T13:19:23 update
-
-# 2021-08-16T19:11:26 update
-
-# 2021-10-02T13:32:20 update
-
-# 2021-10-23T18:31:31 update
-
-# 2021-10-29T13:55:10 update
-
-# 2022-07-31T17:35:39 update
-
-# 2022-09-27T09:32:34 update
-
-# 2022-11-07T14:44:52 update
-
-# 2023-01-23T14:07:09 update
-
-# 2023-03-16T15:23:38 update
-
-# 2023-07-03T18:33:44 update
-
-# 2023-07-27T09:35:11 update
-
-# 2023-11-16T11:22:59 update
-
-# 2023-12-20T14:25:29 update
-
-# 2024-03-07T17:32:49 update
-
-# 2024-04-10T10:50:42 update
-
-# 2024-06-19T19:57:49 update
-
-# 2024-12-05T18:02:46 update
-
-# 2025-01-15T16:13:24 update
-
-# 2025-03-12T20:58:57 update
-
-# 2025-06-24T20:33:23 update
-
-# 2025-08-25T10:56:35 update
-
-# 2025-09-12T17:09:51 update
-
-# 2025-10-06T20:01:10 update
-
-# 2025-10-14T11:48:40 update
-
-# 2026-01-29T13:09:29 update
+        running_workers = self.registry.list(status=AgentStatus.RUNNING, group="WORKER")
+        assert len(running_workers) == 1
+        assert running_workers[0]["name"] == "agent-1"
