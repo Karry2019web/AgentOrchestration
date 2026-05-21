@@ -37,6 +37,11 @@ class RateLimitError(AgentOrchestratorError):
         self.retry_after = retry_after
 
 
+class DeployValidationError(AgentOrchestratorError):
+    def __init__(self, message: str):
+        super().__init__(f"Deploy validation failed: {message}")
+
+
 class ResourceExhaustedError(AgentOrchestratorError):
     def __init__(self, resource: str):
         super().__init__(f"Resource exhausted: {resource}")
