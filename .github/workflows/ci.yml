@@ -27,3 +27,15 @@ jobs:
         run: uv run pytest --cov=src tests/
       - name: Lint
         run: uv run flake8 src/ tests/
+
+  docker-final-stage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build final stage (network-disabled check)
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            --target final \
+            --check \
+            -t agent-orchestrator:ci \
+            .
