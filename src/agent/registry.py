@@ -1,10 +1,19 @@
 """Agent Registry — Manages agent lifecycle and metadata."""
 
 import json
+import logging
 import time
 import uuid
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
+
+from src.common.errors import (
+    AgentNotFoundError,
+    IncompatibleProtocolError,
+    ProtocolNegotiationError,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class AgentStatus(Enum):
@@ -16,13 +25,166 @@ class AgentStatus(Enum):
     TERMINATED = "terminated"
 
 
+class AgentProtocolVersion(Enum):
+    """Supported agent RPC protocol versions. Higher = newer."""
+    V1_0 = "1.0"
+    V1_1 = "1.1"
+    V2_0 = "2.0"
+
+    @classmethod
+    def current(cls) -> "AgentProtocolVersion":
+        """Return the system's current protocol version."""
+        return cls.V2_0
+
+    @classmethod
+    def compatible_versions(cls) -> Set["AgentProtocolVersion"]:
+        """Return all versions compatible with the current system protocol."""
+        current = cls.current()
+        return {v for v in cls if cls._is_compatible(v, current)}
+
+    @staticmethod
+    def _is_compatible(agent_version: "AgentProtocolVersion",
+                       system_version: "AgentProtocolVersion") -> bool:
+        """Check if an agent version is compatible with the system version.
+
+        Compatibility rules:
+        - Same version → compatible
+        - Agent version one major step behind → compatible (backward compatible)
+        - Agent version ahead → compatible only if major is same (forward compatible within major)
+        - Agent version two+ majors behind → incompatible
+        """
+        agent_parts = [int(x) for x in agent_version.value.split(".")]
+        system_parts = [int(x) for x in system_version.value.split(".")]
+
+        agent_major, agent_minor = agent_parts
+        sys_major, sys_minor = system_parts
+
+        # Exact match
+        if agent_major == sys_major and agent_minor == sys_minor:
+            return True
+
+        # Agent ahead within same major series (forward compatible)
+        if agent_major == sys_major and agent_minor > sys_minor:
+            return True
+
+        # Agent one major behind (backward compatible, e.g. V1.x → V2.0)
+        if agent_major == sys_major - 1:
+            return True
+
+        # Agent more than one major behind → incompatible
+        if agent_major <= sys_major - 2:
+            return False
+
+        # Agent ahead by one or more majors → incompatible
+        if agent_major > sys_major and agent_major != sys_major:
+            return False
+
+        return False
+
+    def __ge__(self, other):
+        if self.__class__ is other.__class__:
+            return self._to_int() >= other._to_int()
+        return NotImplemented
+
+    def _to_int(self) -> int:
+        parts = [int(x) for x in self.value.split(".")]
+        return parts[0] * 10000 + parts[1]
+
+
+class ProtocolNegotiator:
+    """Handles agent RPC protocol negotiation during registration and resolution."""
+
+    def __init__(self):
+        self._system_version = AgentProtocolVersion.current()
+        self._compatible_cache: Dict[str, bool] = {}
+
+    def validate_protocol(self, agent_id: str, version: str) -> None:
+        """Validate that an agent's protocol version is compatible.
+
+        Raises:
+            IncompatibleProtocolError: if the version is incompatible.
+            ProtocolNegotiationError: if the version string is malformed.
+        """
+        try:
+            agent_version = AgentProtocolVersion(version)
+        except ValueError:
+            raise ProtocolNegotiationError(
+                agent_id, version,
+                f"Unknown protocol version '{version}'. "
+                f"Supported versions: {[v.value for v in AgentProtocolVersion]}"
+            ) from None
+
+        if not AgentProtocolVersion._is_compatible(agent_version, self._system_version):
+            raise IncompatibleProtocolError(
+                agent_id=agent_id,
+                agent_version=version,
+                system_version=self._system_version.value,
+            )
+
+        # Cache the compatibility
+        self._compatible_cache[agent_id] = True
+
+    def invalidate_cache(self, agent_id: Optional[str] = None) -> None:
+        """Invalidate protocol compatibility cache entries.
+
+        Args:
+            agent_id: If provided, invalidate only this agent's cache entry.
+                      If None, invalidate all entries.
+        """
+        if agent_id:
+            self._compatible_cache.pop(agent_id, None)
+        else:
+            self._compatible_cache.clear()
+
+    def is_version_compatible(self, agent_version: str) -> bool:
+        """Check if a version string is compatible without raising.
+
+        Returns True if compatible, False otherwise.
+        """
+        try:
+            av = AgentProtocolVersion(agent_version)
+            return AgentProtocolVersion._is_compatible(av, self._system_version)
+        except (ValueError, KeyError):
+            return False
+
+    @property
+    def system_version(self) -> str:
+        return self._system_version.value
+
+
 class AgentRegistry:
     def __init__(self, storage_backend: str = "memory"):
         self.storage_backend = storage_backend
         self._agents: Dict[str, Dict[str, Any]] = {}
         self._index: Dict[str, List[str]] = {}
+        self._negotiator = ProtocolNegotiator()
 
-    def register(self, name: str, agent_type: str, config: Optional[Dict] = None) -> str:
+    def register(self, name: str, agent_type: str,
+                 config: Optional[Dict] = None,
+                 protocol_version: Optional[str] = None) -> str:
+        """Register a new agent with protocol version validation.
+
+        Args:
+            name: Agent display name.
+            agent_type: Type identifier (e.g. "worker.processor").
+            config: Optional configuration dict.
+            protocol_version: Agent's protocol version string.
+                             If None, defaults to the current system version.
+
+        Returns:
+            The assigned agent ID.
+
+        Raises:
+            IncompatibleProtocolError: if the agent's protocol version
+                                       is incompatible with the system.
+            ProtocolNegotiationError: if the version string is malformed.
+        """
+        if protocol_version is None:
+            protocol_version = AgentProtocolVersion.current().value
+
+        # Validate protocol compatibility before registering
+        self._negotiator.validate_protocol("new-agent", protocol_version)
+
         agent_id = str(uuid.uuid4())
         timestamp = time.time()
         self._agents[agent_id] = {
@@ -33,7 +195,8 @@ class AgentRegistry:
             "config": config or {},
             "created_at": timestamp,
             "updated_at": timestamp,
-            "version": "1.0.0",
+            "version": protocol_version,
+            "protocol_version": protocol_version,
             "metrics": {"tasks_completed": 0, "errors": 0, "uptime": 0},
         }
         group = agent_type.split(".")[0]
@@ -45,14 +208,36 @@ class AgentRegistry:
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
         return self._agents.get(agent_id)
 
-    def list(self, status: Optional[AgentStatus] = None, group: Optional[str] = None) -> List[Dict[str, Any]]:
-        agents = self._agents.values()
+    def list(self, status: Optional[AgentStatus] = None,
+             group: Optional[str] = None,
+             min_protocol_version: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List agents with optional protocol version filtering.
+
+        Args:
+            status: Optional status filter.
+            group: Optional group filter.
+            min_protocol_version: If set, only return agents whose protocol
+                                  version is >= this value.
+
+        Returns:
+            List of matching agent dicts.
+        """
+        agents = list(self._agents.values())
         if status:
             agents = [a for a in agents if a["status"] == status.value]
         if group:
             agent_ids = self._index.get(group, [])
             agents = [a for a in agents if a["id"] in agent_ids]
-        return list(agents)
+        if min_protocol_version:
+            try:
+                min_v = AgentProtocolVersion(min_protocol_version)
+                agents = [
+                    a for a in agents
+                    if AgentProtocolVersion(a.get("protocol_version", a.get("version", "1.0"))) >= min_v
+                ]
+            except ValueError:
+                logger.warning("Invalid min_protocol_version filter: %s", min_protocol_version)
+        return agents
 
     def update_status(self, agent_id: str, status: AgentStatus) -> bool:
         if agent_id not in self._agents:
@@ -61,10 +246,38 @@ class AgentRegistry:
         self._agents[agent_id]["updated_at"] = time.time()
         return True
 
+    def update_protocol(self, agent_id: str, new_version: str) -> bool:
+        """Update an agent's protocol version after validation.
+
+        Invalidates the compatibility cache for this agent.
+
+        Args:
+            agent_id: The agent to update.
+            new_version: The new protocol version string.
+
+        Returns:
+            True if the update succeeded.
+
+        Raises:
+            AgentNotFoundError: if the agent_id does not exist.
+            IncompatibleProtocolError: if the new version is incompatible.
+            ProtocolNegotiationError: if the version string is malformed.
+        """
+        if agent_id not in self._agents:
+            raise AgentNotFoundError(agent_id)
+
+        self._negotiator.validate_protocol(agent_id, new_version)
+        self._agents[agent_id]["protocol_version"] = new_version
+        self._agents[agent_id]["version"] = new_version
+        self._agents[agent_id]["updated_at"] = time.time()
+        self._negotiator.invalidate_cache(agent_id)
+        return True
+
     def delete(self, agent_id: str) -> bool:
         if agent_id not in self._agents:
             return False
         agent = self._agents.pop(agent_id)
+        self._negotiator.invalidate_cache(agent_id)
         group = agent["type"].split(".")[0]
         if group in self._index and agent_id in self._index[group]:
             self._index[group].remove(agent_id)
@@ -73,110 +286,6 @@ class AgentRegistry:
     def count(self) -> int:
         return len(self._agents)
 
-# 2019-01-29T11:24:49 update
-
-# 2019-04-09T13:38:38 update
-
-# 2019-04-11T11:24:12 update
-
-# 2019-06-26T17:03:48 update
-
-# 2019-07-03T14:55:48 update
-
-# 2019-07-18T18:18:47 update
-
-# 2019-11-05T11:27:19 update
-
-# 2019-11-20T11:35:05 update
-
-# 2019-11-23T15:28:54 update
-
-# 2020-03-13T09:23:07 update
-
-# 2020-03-30T19:31:18 update
-
-# 2020-04-22T15:03:30 update
-
-# 2020-07-21T10:00:48 update
-
-# 2020-09-10T09:02:08 update
-
-# 2020-09-10T13:39:12 update
-
-# 2020-09-22T16:27:52 update
-
-# 2020-10-15T10:33:14 update
-
-# 2021-05-13T11:15:56 update
-
-# 2021-07-07T14:57:13 update
-
-# 2021-07-13T15:15:19 update
-
-# 2021-07-27T10:18:16 update
-
-# 2022-03-11T15:24:11 update
-
-# 2022-09-22T13:24:20 update
-
-# 2022-11-01T12:20:40 update
-
-# 2023-01-30T12:32:27 update
-
-# 2023-03-10T09:43:50 update
-
-# 2023-05-10T14:28:01 update
-
-# 2023-05-11T20:04:46 update
-
-# 2023-05-30T17:00:59 update
-
-# 2023-07-13T17:54:32 update
-
-# 2023-07-20T19:04:20 update
-
-# 2023-07-31T17:00:02 update
-
-# 2023-09-05T19:42:07 update
-
-# 2024-01-02T10:29:47 update
-
-# 2024-09-17T12:45:29 update
-
-# 2024-09-17T11:51:01 update
-
-# 2024-11-06T18:20:15 update
-
-# 2025-01-12T15:13:14 update
-
-# 2025-01-14T20:24:39 update
-
-# 2025-03-26T20:21:27 update
-
-# 2025-04-10T18:27:06 update
-
-# 2025-06-19T20:34:58 update
-
-# 2025-06-21T20:23:53 update
-
-# 2025-06-24T20:30:30 update
-
-# 2025-07-03T13:28:03 update
-
-# 2025-07-24T17:42:21 update
-
-# 2025-08-19T17:42:23 update
-
-# 2025-08-21T11:06:52 update
-
-# 2025-10-24T09:10:08 update
-
-# 2025-12-18T19:34:38 update
-
-# 2026-02-06T11:22:22 update
-
-# 2026-02-13T15:42:04 update
-
-# 2026-04-10T08:16:30 update
-
-# 2026-04-29T18:16:11 update
+    @property
+    def negotiator(self) -> ProtocolNegotiator:
+        return self._negotiator
