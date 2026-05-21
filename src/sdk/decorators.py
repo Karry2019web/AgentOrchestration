@@ -6,7 +6,12 @@ from typing import Any, Callable, Dict, Optional
 
 
 def task(name: Optional[str] = None, retries: int = 0, timeout: int = 300):
-    """Decorator for marking a method as an agent task handler."""
+    """Decorator for marking a method as an agent task handler.
+
+    Supports both async and synchronous functions. Sync functions are wrapped
+    in a coroutine and run via the event loop executor so they integrate
+    transparently with the async task framework.
+    """
     def decorator(func: Callable) -> Callable:
         func.__task_config__ = {
             "name": name or func.__name__,
@@ -17,13 +22,24 @@ def task(name: Optional[str] = None, retries: int = 0, timeout: int = 300):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
             try:
-                result = await asyncio.wait_for(
-                    func(*args, **kwargs),
-                    timeout=timeout,
-                )
+                if asyncio.iscoroutinefunction(func):
+                    result = await asyncio.wait_for(
+                        func(*args, **kwargs),
+                        timeout=timeout,
+                    )
+                else:
+                    loop = asyncio.get_event_loop()
+                    result = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None, lambda: func(*args, **kwargs)
+                        ),
+                        timeout=timeout,
+                    )
                 return result
             except asyncio.TimeoutError:
-                raise TimeoutError(f"Task {name or func.__name__} timed out after {timeout}s")
+                raise TimeoutError(
+                    f"Task {name or func.__name__} timed out after {timeout}s"
+                )
 
         return wrapper
     return decorator
