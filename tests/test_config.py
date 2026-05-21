@@ -135,3 +135,44 @@ class TestConfig:
 # 2026-02-11T19:28:37 update
 
 # 2026-04-17T10:00:53 update
+
+
+class TestConfigCoercion:
+    def test_coerce_env_true_to_boolean(self, monkeypatch):
+        monkeypatch.setenv("AO_FEATURE_ENABLED", "true")
+        config = Config()
+        assert config.get("feature.enabled") is True
+        assert isinstance(config.get("feature.enabled"), bool)
+
+    def test_coerce_env_false_to_boolean(self, monkeypatch):
+        monkeypatch.setenv("AO_FEATURE_ENABLED", "false")
+        config = Config()
+        assert config.get("feature.enabled") is False
+        assert isinstance(config.get("feature.enabled"), bool)
+
+    def test_coerce_env_mixed_case(self, monkeypatch):
+        monkeypatch.setenv("AO_FLAG", "True")
+        config = Config()
+        assert config.get("flag") is True
+
+    def test_coerce_env_non_boolean_preserved(self, monkeypatch):
+        monkeypatch.setenv("AO_DB_HOST", "localhost")
+        config = Config()
+        assert config.get("db.host") == "localhost"
+
+    def test_coerce_env_numeric_preserved(self, monkeypatch):
+        monkeypatch.setenv("AO_APP_PORT", "8080")
+        config = Config()
+        assert config.get("app.port") == "8080"
+
+    def test_boolean_env_overrides_config_file(self, monkeypatch, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text('{"feature": {"enabled": true}}')
+        monkeypatch.setenv("AO_FEATURE_ENABLED", "false")
+        config = Config(str(config_file))
+        assert config.get("feature.enabled") is False
+
+    def test_coerce_whitespace_tolerant(self, monkeypatch):
+        monkeypatch.setenv("AO_FLAG", " true ")
+        config = Config()
+        assert config.get("flag") is True
