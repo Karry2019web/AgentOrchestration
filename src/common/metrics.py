@@ -1,17 +1,19 @@
 """Metrics collection and reporting."""
 
 import time
-from collections import defaultdict
-from typing import Dict, List
+from collections import defaultdict, deque
+from typing import Dict
 from threading import Lock
 
 
 class MetricsCollector:
-    def __init__(self):
+    def __init__(self, max_samples: int = 1000):
         self._lock = Lock()
         self._counters: Dict[str, int] = defaultdict(int)
         self._gauges: Dict[str, float] = {}
-        self._histograms: Dict[str, List[float]] = defaultdict(list)
+        self._histograms: Dict[str, deque] = defaultdict(
+            lambda: deque(maxlen=max_samples)
+        )
         self._timers: Dict[str, float] = {}
 
     def increment(self, metric: str, value: int = 1) -> None:
@@ -24,7 +26,7 @@ class MetricsCollector:
 
     def observe(self, metric: str, value: float) -> None:
         with self._lock:
-            self._histograms[metric].append(value)
+            self._histograms[metric].append(value)  # deque with maxlen trims oldest
 
     def start_timer(self, metric: str) -> None:
         with self._lock:
@@ -189,3 +191,5 @@ metrics = MetricsCollector()
 # 2026-04-23T12:24:44 update
 
 # 2026-05-18T20:56:34 update
+
+# 2026-05-21T12:00:00 update - bound histogram sample storage (#982)

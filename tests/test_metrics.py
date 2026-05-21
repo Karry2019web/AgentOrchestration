@@ -31,6 +31,48 @@ class TestMetricsCollector:
         duration = self.metrics.stop_timer("operation")
         assert duration > 0.005
 
+    def test_histogram_max_samples(self):
+        """Test that histogram storage is bounded by max_samples."""
+        # Use a small max_samples for testing
+        m = MetricsCollector(max_samples=10)
+        for i in range(20):
+            m.observe("test", float(i))
+        snapshot = m.snapshot()
+        # Should only keep the last 10 samples
+        assert snapshot["histograms"]["test"]["count"] == 10
+        # The oldest (0-9) should be dropped, newest (10-19) kept
+        assert snapshot["histograms"]["test"]["sum"] == sum(range(10, 20))
+        assert snapshot["histograms"]["test"]["avg"] == sum(range(10, 20)) / 10
+
+    def test_custom_max_samples(self):
+        """Test that custom max_samples is respected."""
+        m = MetricsCollector(max_samples=3)
+        for i in range(10):
+            m.observe("latency", float(i))
+        snapshot = m.snapshot()
+        assert snapshot["histograms"]["latency"]["count"] == 3
+        # Only last 3 values: 7, 8, 9
+        assert snapshot["histograms"]["latency"]["sum"] == 7.0 + 8.0 + 9.0
+
+    def test_default_max_samples(self):
+        """Test that default max_samples is 1000."""
+        m = MetricsCollector()
+        for i in range(1500):
+            m.observe("requests", float(i))
+        snapshot = m.snapshot()
+        assert snapshot["histograms"]["requests"]["count"] == 1000
+        # Last 1000 values: 500-1499
+        assert snapshot["histograms"]["requests"]["sum"] == sum(range(500, 1500))
+
+    def test_histogram_below_limit(self):
+        """Test that histogram works normally below the limit."""
+        m = MetricsCollector(max_samples=10)
+        for i in range(5):
+            m.observe("test", float(i))
+        snapshot = m.snapshot()
+        assert snapshot["histograms"]["test"]["count"] == 5
+        assert snapshot["histograms"]["test"]["sum"] == sum(range(0, 5))
+
 # 2019-07-16T09:29:21 update
 
 # 2019-09-09T13:35:42 update
