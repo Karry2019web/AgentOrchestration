@@ -39,16 +39,16 @@ class TestOperationalStore:
 
     def test_compact_removes_old_records(self):
         store = OperationalStore(max_records=100)
-        old = _make_event(event_type="old")
-        store.write(old)
-        later = _make_event(event_type="new")
-        store.write(later)
-        # Compact using a timestamp after the first record
-        cut = datetime.datetime.utcnow().isoformat() + "Z"
+        # Write events manually with explicit timestamps
         old_ts = (datetime.datetime.utcnow() - datetime.timedelta(hours=2)).isoformat() + "Z"
-        store.write(_make_event())
+        record = _make_event(event_type="old")
+        record.timestamp = old_ts
+        store._records.append(record)
+        assert store.count() == 1
+        # Compact using current time — removes old record
+        cut = datetime.datetime.utcnow().isoformat() + "Z"
         removed = store.compact(cut)
-        assert removed > 0
+        assert removed == 1
 
     def test_compact_does_not_affect_recent(self):
         store = OperationalStore(max_records=100)
@@ -125,8 +125,9 @@ class TestAuditStore:
         store2 = AuditStore()
         store2.append(_make_event(event_id="b"))
         store2.append(_make_event(event_id="a"))
-        assert d1 == store2._records[0].digest  # first record zero-chain different payload
-        # The second record's digest depends on first's digest => different chain
+        # First records have different content (event_id="a" vs "b") => different digests
+        assert d1 != store2._records[0].digest
+        # Second record's digest chains from first, which is different => different chain
         assert d2 != store2._records[1].digest
 
     def test_count(self):
