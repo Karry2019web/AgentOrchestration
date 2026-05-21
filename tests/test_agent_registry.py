@@ -147,7 +147,7 @@ class TestRegistryProtocolIntegration:
         assert agent["protocol_version"] == "1.1"
 
     def test_register_with_incompatible_version(self):
-        with pytest.raises(IncompatibleProtocolError):
+        with pytest.raises(ProtocolNegotiationError):
             self.registry.register(
                 "test-agent", "worker.processor", protocol_version="99.99"
             )
@@ -172,7 +172,7 @@ class TestRegistryProtocolIntegration:
     def test_update_protocol_incompatible(self):
         agent_id = self.registry.register("test-agent", "worker.processor",
                                            protocol_version="2.0")
-        with pytest.raises(IncompatibleProtocolError):
+        with pytest.raises(ProtocolNegotiationError):
             self.registry.update_protocol(agent_id, "99.99")
 
     def test_registry_caches_compatibility(self):
