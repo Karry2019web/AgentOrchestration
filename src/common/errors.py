@@ -41,6 +41,15 @@ class ResourceExhaustedError(AgentOrchestratorError):
     def __init__(self, resource: str):
         super().__init__(f"Resource exhausted: {resource}")
 
+
+class DestructiveMigrationError(AgentOrchestratorError):
+    """Raised when a destructive deployment fails preflight checks."""
+    def __init__(self, migration_name: str, reason: str):
+        self.migration_name = migration_name
+        self.reason = reason
+        super().__init__(f"Destructive migration '{migration_name}' blocked: {reason}")
+
+
 # 2019-01-25T13:21:06 update
 
 # 2019-02-15T19:31:32 update
