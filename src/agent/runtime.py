@@ -41,6 +41,7 @@ class AgentRuntime:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
+            self._start_drain_thread(agent_id, proc)
             self._processes[agent_id] = proc
             self._states[agent_id] = RuntimeState.RUNNING
             logger.info(f"Agent {agent_id} started (PID: {proc.pid})")
@@ -49,6 +50,21 @@ class AgentRuntime:
             self._states[agent_id] = RuntimeState.CRASHED
             logger.error(f"Failed to start agent {agent_id}: {e}")
             return False
+
+    def _start_drain_thread(self, agent_id: str, proc: subprocess.Popen) -> None:
+        """Start a background thread to drain stdout/stderr pipes,
+        preventing the process from hanging when the OS pipe buffer fills up."""
+        import threading as _threading
+        def _drain(stream, name):
+            try:
+                for line in iter(stream.readline, b""):
+                    logger.debug(f"[{agent_id}:{name}] {line.decode('utf-8', errors='replace').rstrip()}")
+                stream.close()
+            except Exception:
+                pass
+        for stream, name in [(proc.stdout, "stdout"), (proc.stderr, "stderr")]:
+            t = _threading.Thread(target=_drain, args=(stream, name), daemon=True)
+            t.start()
 
     def stop(self, agent_id: str, timeout: int = 10) -> bool:
         proc = self._processes.get(agent_id)
