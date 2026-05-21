@@ -16,12 +16,36 @@ class Config:
         with open(path) as f:
             self._data = json.load(f)
 
+    @staticmethod
+    def _coerce_value(value: str) -> Any:
+        """Coerce a string environment value to a typed Python value.
+
+        - true/1/yes/y/on -> True (case-insensitive)
+        - false/0/no/n/off -> False (case-insensitive)
+        - Numeric strings -> int
+        - Otherwise returns the original string
+        """
+        lower = value.strip().lower()
+        if lower in ("true", "1", "yes", "y", "on"):
+            return True
+        if lower in ("false", "0", "no", "n", "off"):
+            return False
+        try:
+            return int(value)
+        except ValueError:
+            pass
+        try:
+            return float(value)
+        except ValueError:
+            pass
+        return value
+
     def _load_env_overrides(self) -> None:
         prefix = "AO_"
         for key, value in os.environ.items():
             if key.startswith(prefix):
                 config_key = key[len(prefix):].lower().replace("_", ".")
-                self._set_nested(config_key, value)
+                self._set_nested(config_key, self._coerce_value(value))
 
     def _set_nested(self, key: str, value: Any) -> None:
         parts = key.split(".")
