@@ -1,10 +1,21 @@
-"""Task Scheduler — Priority-based task queuing and dispatch."""
+"""Task Scheduler — Priority-based task queuing and dispatch with idempotent dead-letter handling."""
 
 import asyncio
 import heapq
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
+
+
+class DeadLetterRecord:
+    """Record for a dead-lettered task with acknowledgement tracking."""
+    def __init__(self, task_id: str, task: Dict, reason: str, timestamp: float = None):
+        self.task_id = task_id
+        self.task = task
+        self.reason = reason
+        self.timestamp = timestamp or time.time()
+        self.acknowledged = False
+        self.acknowledged_at: Optional[float] = None
 
 
 class PriorityQueue:
@@ -35,18 +46,20 @@ class TaskScheduler:
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
+        self._dead_letter: Dict[str, DeadLetterRecord] = {}
+        self._acked_tasks: Set[str] = set()
         self._max_retries = 3
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
-        task_id = str(uuid4())
-        task["id"] = task_id
+        if "id" not in task:
+            task["id"] = str(uuid4())
         task["enqueued_at"] = time.time()
-        task["retries"] = 0
+        task["retries"] = task.get("retries", 0)
 
         if queue not in self._queues:
             self._queues[queue] = PriorityQueue()
         self._queues[queue].push(task, priority)
-        return task_id
+        return task["id"]
 
     def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
         task_id = str(uuid4())
@@ -58,9 +71,9 @@ class TaskScheduler:
         now = time.time()
         expired = [tid for tid, t in self._scheduled.items() if t <= now]
         for tid in expired:
-            task = self._scheduled.pop(tid)
-            if task:
-                self.enqueue(task, queue)
+            task_data = self._scheduled.pop(tid)
+            if task_data:
+                self.enqueue(task_data, queue)
 
         if queue in self._queues and len(self._queues[queue]) > 0:
             task = self._queues[queue].pop()
@@ -70,147 +83,78 @@ class TaskScheduler:
         return None
 
     def complete(self, task_id: str) -> bool:
-        return self._in_flight.pop(task_id, None) is not None
+        if task_id in self._acked_tasks:
+            return True
+        task = self._in_flight.pop(task_id, None)
+        if task is not None:
+            self._acked_tasks.add(task_id)
+            return True
+        return False
 
     def fail(self, task_id: str, queue: str = "default") -> bool:
+        if task_id in self._acked_tasks:
+            return False
         task = self._in_flight.pop(task_id, None)
         if task:
             task["retries"] += 1
             if task["retries"] < self._max_retries:
-                self.enqueue(task, queue, priority=task.get("priority", 0))
+                if queue not in self._queues:
+                    self._queues[queue] = PriorityQueue()
+                self._queues[queue].push(task, priority=task.get("priority", 0))
                 return True
+            else:
+                self._send_to_dead_letter(task, "max_retries_exceeded")
         return False
 
-# 2019-04-25T08:37:12 update
-
-# 2019-06-04T16:40:00 update
-
-# 2019-07-11T12:01:28 update
-
-# 2019-08-02T12:20:21 update
-
-# 2019-08-23T10:38:50 update
-
-# 2019-10-31T13:55:52 update
-
-# 2019-11-04T20:12:32 update
-
-# 2019-12-13T12:22:36 update
-
-# 2020-02-01T10:32:37 update
-
-# 2020-02-26T09:44:38 update
-
-# 2020-03-09T19:00:55 update
-
-# 2020-05-01T18:40:34 update
-
-# 2020-05-12T15:10:31 update
-
-# 2020-06-30T13:24:19 update
-
-# 2020-09-22T16:00:45 update
-
-# 2020-10-20T10:52:48 update
-
-# 2020-10-21T12:18:08 update
-
-# 2020-11-06T12:35:01 update
-
-# 2020-12-09T08:09:33 update
-
-# 2021-01-07T08:20:36 update
-
-# 2021-10-02T15:23:16 update
-
-# 2021-10-06T16:14:57 update
-
-# 2021-10-06T09:27:41 update
-
-# 2021-11-19T08:37:40 update
-
-# 2022-03-01T16:39:54 update
-
-# 2022-05-26T13:43:07 update
-
-# 2022-06-02T10:50:58 update
-
-# 2022-06-14T10:46:48 update
-
-# 2022-07-31T16:44:34 update
-
-# 2022-08-30T18:20:12 update
-
-# 2022-11-04T14:47:03 update
-
-# 2022-12-06T10:36:49 update
-
-# 2022-12-22T13:21:12 update
-
-# 2022-12-26T12:24:50 update
-
-# 2023-03-09T08:09:55 update
-
-# 2023-05-01T10:07:37 update
-
-# 2023-06-08T14:32:15 update
-
-# 2023-07-14T17:24:18 update
-
-# 2023-12-14T08:38:31 update
-
-# 2024-02-20T13:43:58 update
-
-# 2024-03-24T08:52:42 update
-
-# 2024-03-28T15:27:17 update
-
-# 2024-03-29T18:10:33 update
-
-# 2024-04-15T20:18:31 update
-
-# 2024-05-27T13:11:52 update
-
-# 2024-05-27T16:42:56 update
-
-# 2024-06-20T13:03:45 update
-
-# 2024-06-28T12:32:58 update
-
-# 2024-07-10T14:10:16 update
-
-# 2024-07-26T14:18:59 update
-
-# 2024-08-12T08:21:05 update
-
-# 2024-08-21T16:58:40 update
-
-# 2024-09-27T19:54:30 update
-
-# 2024-10-21T13:47:42 update
-
-# 2024-11-11T09:19:27 update
-
-# 2024-12-24T08:23:41 update
-
-# 2025-02-14T10:35:15 update
-
-# 2025-03-31T18:09:40 update
-
-# 2025-06-21T17:32:49 update
-
-# 2025-07-21T16:52:28 update
-
-# 2025-08-20T19:45:16 update
-
-# 2025-11-04T18:54:24 update
-
-# 2025-12-09T20:17:36 update
-
-# 2026-01-12T15:42:32 update
-
-# 2026-01-23T14:41:20 update
-
-# 2026-03-18T14:43:07 update
-
-# 2026-04-13T11:43:19 update
+    def _send_to_dead_letter(self, task: Dict, reason: str) -> None:
+        task_id = task["id"]
+        if task_id not in self._dead_letter:
+            self._dead_letter[task_id] = DeadLetterRecord(
+                task_id=task_id, task=task, reason=reason
+            )
+
+    def acknowledge_dead_letter(self, task_id: str) -> bool:
+        """Acknowledge a dead-lettered task, making all subsequent operations idempotent."""
+        record = self._dead_letter.get(task_id)
+        if record is None:
+            return False
+        if record.acknowledged:
+            return True
+        record.acknowledged = True
+        record.acknowledged_at = time.time()
+        self._acked_tasks.add(task_id)
+        return True
+
+    def retry_dead_letter(self, task_id: str, queue: str = "default") -> bool:
+        """Retry a dead-lettered task by re-enqueuing it."""
+        if task_id in self._acked_tasks:
+            return False
+        record = self._dead_letter.pop(task_id, None)
+        if record is None:
+            return False
+        record.task["retries"] = 0
+        record.task["dead_letter_retry"] = True
+        if queue not in self._queues:
+            self._queues[queue] = PriorityQueue()
+        self._queues[queue].push(record.task, 0)
+        return True
+
+    def list_dead_letter(self) -> List[Dict]:
+        """List all dead-lettered tasks with their acknowledgement status."""
+        return [
+            {
+                "task_id": r.task_id,
+                "task_type": r.task.get("type", "unknown"),
+                "reason": r.reason,
+                "timestamp": r.timestamp,
+                "acknowledged": r.acknowledged,
+            }
+            for r in self._dead_letter.values()
+        ]
+
+    def dead_letter_count(self) -> Dict[str, int]:
+        """Count dead-letter records grouped by reason."""
+        counts: Dict[str, int] = {}
+        for record in self._dead_letter.values():
+            counts[record.reason] = counts.get(record.reason, 0) + 1
+        return counts
