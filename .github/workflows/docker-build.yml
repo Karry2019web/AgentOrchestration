@@ -1,0 +1,46 @@
+name: Docker Build
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'Dockerfile'
+      - 'src/**'
+      - 'pyproject.toml'
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with network disabled (final stage)
+        run: |
+          docker build --network=none -t agent-orchestrator:test \
+            --target final \
+            -f Dockerfile .
+
+      - name: Verify network-off marker
+        run: |
+          MARKER=$(docker run --rm agent-orchestrator:test cat /etc/network-off-marker)
+          if [ "$MARKER" != "network-off-enabled=true" ]; then
+            echo "Network-off not enforced in final stage!"
+            exit 1
+          fi
+          echo "✓ Final stage has network disabled"
+
+      - name: Verify no network tools in final image
+        run: |
+          for cmd in curl wget apt-get pip; do
+            if docker run --rm agent-orchestrator:test which $cmd 2>/dev/null; then
+              echo "ERROR: $cmd should not be available in final stage"
+              exit 1
+            fi
+          done
+          echo "✓ No network tools in final stage"
+
+      - name: Run basic smoke test
+        run: |
+          docker run --rm agent-orchestrator:test python -c "import src; print('OK')"
