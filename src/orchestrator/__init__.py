@@ -139,3 +139,5 @@ __all__ = ["OrchestrationEngine", "TaskScheduler", "WorkflowManager"]
 # 2026-02-27T17:31:58 update
 
 # 2026-05-01T09:31:24 update
+
+from .engine import EventDispatcher
