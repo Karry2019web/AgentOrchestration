@@ -9,6 +9,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from .routes import router
 from .middleware import AuthMiddleware, RateLimitMiddleware, LoggingMiddleware
+from . import webhook  # noqa: F401 - ensure webhook module is loaded
 
 
 def create_app(config: Dict = None) -> FastAPI:
