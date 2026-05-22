@@ -35,6 +35,7 @@ class TaskScheduler:
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
+        self._owner: Dict[str, str] = {}
         self._max_retries = 3
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
@@ -66,8 +67,22 @@ class TaskScheduler:
             task = self._queues[queue].pop()
             if task:
                 self._in_flight[task["id"]] = task
+                self._owner[task["id"]] = task.get("worker_id", "unknown")
                 return task
         return None
+
+    def batch_acknowledge(self, task_ids: list, worker_id: str) -> Dict[str, bool]:
+        results = {}
+        for task_id in task_ids:
+            owner = self._owner.get(task_id)
+            if owner and owner != worker_id:
+                results[task_id] = False
+                continue
+            success = self.complete(task_id)
+            if success:
+                self._owner.pop(task_id, None)
+            results[task_id] = success
+        return results
 
     def complete(self, task_id: str) -> bool:
         return self._in_flight.pop(task_id, None) is not None
