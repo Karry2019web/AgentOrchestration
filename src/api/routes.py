@@ -3,8 +3,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from typing import List, Dict, Optional
 
-from src.agent import AgentRegistry, AgentStatus
-from src.api.webhook import WebhookDeliverer, get_deliverer, WebhookEvent
+from src.agent.registry import AgentRegistry, AgentStatus
 
 router = APIRouter()
 registry = AgentRegistry()
@@ -54,44 +53,6 @@ async def stop_agent(agent_id: str):
 @router.get("/agents/count")
 async def agent_count():
     return {"count": registry.count()}
-
-@router.post("/webhooks/deliver")
-async def deliver_webhook(event_id: str, event_type: str, destination: str,
-                           webhook_id: str, payload: dict = None,
-                           idempotency_key: str = None):
-    """Deliver a webhook event with idempotency protection."""
-    import asyncio
-    deliverer = get_deliverer()
-    event = WebhookEvent(
-        event_id=event_id,
-        event_type=event_type,
-        payload=payload or {},
-        idempotency_key=idempotency_key or "",
-    )
-    try:
-        result = await deliverer.deliver(event, destination, webhook_id, idempotency_key=idempotency_key)
-        return result
-    except Exception as e:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=502, detail=str(e))
-
-
-@router.get("/webhooks/deliveries")
-async def list_webhook_deliveries():
-    """List recent webhook delivery records."""
-    deliverer = get_deliverer()
-    return {"deliveries": deliverer.records, "count": deliverer.count()}
-
-
-@router.get("/webhooks/deliveries/{idempotency_key}")
-async def get_webhook_delivery(idempotency_key: str):
-    """Look up a delivery by idempotency key."""
-    deliverer = get_deliverer()
-    result = deliverer.lookup(idempotency_key)
-    if result is None:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Delivery not found")
-    return result
 
 # 2019-03-18T11:10:18 update
 
