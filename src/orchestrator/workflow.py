@@ -3,6 +3,26 @@
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
+import time
+import logging
+
+
+class ArtifactRetentionCategory(Enum):
+    """Categories of workflow artifacts with distinct retention rules."""
+    LOG = "log"
+    METRIC = "metric"
+    CHECKPOINT = "checkpoint"
+    RESULT = "result"
+    TEMPORARY = "temporary"
+
+
+ARTIFACT_RETENTION_POLICIES: Dict[ArtifactRetentionCategory, int] = {
+    ArtifactRetentionCategory.LOG: 86400 * 7,         # 7 days
+    ArtifactRetentionCategory.METRIC: 86400 * 30,      # 30 days
+    ArtifactRetentionCategory.CHECKPOINT: 86400 * 90,  # 90 days
+    ArtifactRetentionCategory.RESULT: 86400 * 365,     # 365 days
+    ArtifactRetentionCategory.TEMPORARY: 3600,         # 1 hour
+}
 
 
 class StepStatus(Enum):
@@ -11,6 +31,130 @@ class StepStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+
+
+class CleanupSchedule:
+    """Represents a scheduled cleanup entry for workflow artifacts."""
+
+    def __init__(
+        self,
+        category: ArtifactRetentionCategory,
+        created_at: float,
+        retention_seconds: int,
+    ):
+        self.category = category
+        self.created_at = created_at
+        self.retention_seconds = retention_seconds
+
+    @property
+    def eligible_at(self) -> float:
+        """Timestamp at which this artifact becomes eligible for cleanup."""
+        return self.created_at + self.retention_seconds
+
+    @property
+    def is_overdue(self) -> bool:
+        """Whether the artifact should already have been cleaned up."""
+        return time.time() >= self.eligible_at
+
+    def __repr__(self):
+        return (
+            f"CleanupSchedule(category={self.category.value}, "
+            f"created_at={self.created_at:.0f}, "
+            f"retention={self.retention_seconds}s, "
+            f"eligible_at={self.eligible_at:.0f})"
+        )
+
+
+class ArtifactRetentionValidator:
+    """Validates artifact retention policies before cleanup scheduling.
+
+    Enforces retention invariants at workflow registration and pre-dispatch
+    time so that invalid scheduling definitions cannot start executing.
+    """
+
+    def __init__(self):
+        self._logger = logging.getLogger(__name__)
+        self._violations: List[str] = []
+
+    def validate_schedule(
+        self,
+        schedule: CleanupSchedule,
+    ) -> bool:
+        """Validate a single cleanup schedule entry.
+
+        Returns True if valid, False if a policy violation is detected.
+        Violations are recorded via logs and the internal violations list.
+        """
+        violations: List[str] = []
+
+        # Rule 1: Retention must be positive
+        if schedule.retention_seconds <= 0:
+            violations.append(
+                f"Non-positive retention ({schedule.retention_seconds}s) "
+                f"for category {schedule.category.value}; "
+                f"minimum is 1 second"
+            )
+
+        # Rule 2: Retention must not exceed the allowed maximum for the category
+        max_allowed = ARTIFACT_RETENTION_POLICIES.get(schedule.category)
+        if max_allowed is not None and schedule.retention_seconds > max_allowed:
+            violations.append(
+                f"Retention ({schedule.retention_seconds}s) exceeds "
+                f"max allowed ({max_allowed}s) for category "
+                f"{schedule.category.value}"
+            )
+
+        # Rule 3: Created-at must be a reasonable timestamp (past or near-present)
+        now = time.time()
+        if schedule.created_at > now + 300:
+            violations.append(
+                f"Created-at timestamp ({schedule.created_at:.0f}) "
+                f"is in the future (now={now:.0f}); "
+                f"cannot schedule cleanup for an artifact that does not exist yet"
+            )
+
+        # Rule 4: An overdue artifact must have at least 1s of retention remaining
+        if schedule.is_overdue and schedule.retention_seconds < 3600:
+            violations.append(
+                f"Artifact is already overdue (eligible_at={schedule.eligible_at:.0f}) "
+                f"with short retention ({schedule.retention_seconds}s); "
+                f"cleanup should have already fired — rejecting stale schedule"
+            )
+
+        for v in violations:
+            self._violations.append(v)
+            self._logger.warning("Artifact retention violation: %s", v)
+
+        self._logger.info(
+            "Artifact retention validation: %s for %s schedule",
+            "PASSED" if not violations else "FAILED",
+            schedule.category.value,
+        )
+        return len(violations) == 0
+
+    def validate_workflow(self, workflow_name: str, schedules: List[CleanupSchedule]) -> bool:
+        """Validate all cleanup schedules for a workflow.
+
+        Returns True if ALL schedules pass validation.
+        """
+        self._violations = []
+        all_valid = True
+        for s in schedules:
+            if not self.validate_schedule(s):
+                all_valid = False
+
+        if not all_valid:
+            self._logger.error(
+                "Workflow '%s' has %d retention policy violation(s); "
+                "registration rejected",
+                workflow_name,
+                len(self._violations),
+            )
+        return all_valid
+
+    @property
+    def violations(self) -> List[str]:
+        return list(self._violations)
 
 
 class WorkflowStep:
@@ -33,6 +177,7 @@ class Workflow:
         self.steps: List[WorkflowStep] = []
         self._step_map: Dict[str, WorkflowStep] = {}
         self.status = StepStatus.PENDING
+        self.cleanup_schedules: List[CleanupSchedule] = []
 
     def add_step(self, step: WorkflowStep) -> "Workflow":
         self.steps.append(step)
@@ -42,14 +187,43 @@ class Workflow:
     def get_step(self, step_id: str) -> Optional[WorkflowStep]:
         return self._step_map.get(step_id)
 
+    def add_cleanup_schedule(self, schedule: CleanupSchedule) -> "Workflow":
+        self.cleanup_schedules.append(schedule)
+        return self
+
 
 class WorkflowManager:
     def __init__(self):
         self._workflows: Dict[str, Workflow] = {}
+        self._retention_validator = ArtifactRetentionValidator()
+
+    @property
+    def retention_validator(self) -> ArtifactRetentionValidator:
+        return self._retention_validator
 
     def create_workflow(self, name: str, description: str = "") -> Workflow:
         workflow = Workflow(name, description)
         self._workflows[workflow.id] = workflow
+        return workflow
+
+    def register_workflow(
+        self,
+        name: str,
+        description: str = "",
+        cleanup_schedules: Optional[List[CleanupSchedule]] = None,
+    ) -> Optional[Workflow]:
+        """Register a workflow with pre-dispatch artifact retention validation.
+
+        Validates cleanup schedules before the workflow is stored. If validation
+        fails, the workflow is rejected and None is returned — preventing bad
+        scheduling graphs from ever starting execution.
+        """
+        schedules = cleanup_schedules or []
+        if not self._retention_validator.validate_workflow(name, schedules):
+            return None
+
+        workflow = self.create_workflow(name, description)
+        workflow.cleanup_schedules = schedules
         return workflow
 
     def get_workflow(self, workflow_id: str) -> Optional[Workflow]:
@@ -108,59 +282,65 @@ class WorkflowManager:
 
 # 2020-12-05T20:55:47 update
 
-# 2021-01-15T19:23:40 update
+# 2021-01-05T09:57:38 update
 
-# 2021-02-03T20:43:12 update
+# 2021-02-05T15:02:56 update
 
-# 2021-03-16T12:26:47 update
+# 2021-04-20T18:28:08 update
 
-# 2021-04-20T14:33:28 update
+# 2021-05-26T14:35:42 update
 
-# 2021-10-14T15:03:32 update
+# 2021-06-14T19:08:08 update
 
-# 2021-10-21T17:24:55 update
+# 2021-07-26T12:20:37 update
 
-# 2021-11-16T17:01:08 update
+# 2021-08-12T19:14:49 update
 
-# 2021-11-22T09:51:21 update
+# 2021-08-20T12:18:28 update
 
-# 2021-12-21T16:15:47 update
+# 2021-11-04T15:19:39 update
 
-# 2022-03-23T16:52:27 update
+# 2021-12-03T14:33:15 update
 
-# 2022-12-21T09:25:50 update
+# 2022-01-06T08:17:48 update
 
-# 2023-01-09T09:55:25 update
+# 2022-02-07T19:02:21 update
 
-# 2023-01-13T11:06:15 update
+# 2022-04-21T14:14:44 update
 
-# 2023-01-26T11:00:59 update
+# 2022-07-25T10:31:21 update
 
-# 2023-02-23T08:56:54 update
+# 2022-10-14T08:10:01 update
 
-# 2023-05-17T08:07:16 update
+# 2022-12-28T18:42:01 update
 
-# 2023-06-06T17:09:34 update
+# 2023-02-14T18:15:32 update
 
-# 2023-06-13T10:35:28 update
+# 2023-04-10T09:33:36 update
 
-# 2023-08-24T20:36:06 update
+# 2023-05-19T20:21:33 update
 
-# 2023-10-30T19:10:13 update
+# 2023-06-23T18:22:46 update
 
-# 2024-01-02T08:27:25 update
+# 2023-08-04T08:48:21 update
 
-# 2024-01-24T12:13:15 update
+# 2023-08-24T10:06:28 update
 
-# 2024-02-08T13:35:49 update
+# 2023-11-02T12:04:00 update
 
-# 2024-05-07T16:09:24 update
+# 2023-11-17T17:50:34 update
 
-# 2024-05-11T09:48:46 update
+# 2024-02-05T20:02:21 update
 
-# 2024-05-21T19:25:41 update
+# 2024-02-29T10:58:06 update
 
-# 2024-06-05T12:00:30 update
+# 2024-03-19T17:12:37 update
+
+# 2024-05-06T11:50:24 update
+
+# 2024-05-10T09:50:49 update
+
+# 2024-06-10T12:00:30 update
 
 # 2024-06-25T09:40:26 update
 
