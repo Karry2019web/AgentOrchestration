@@ -7,8 +7,9 @@ from uuid import uuid4
 
 
 class AgentExecutor:
-    def __init__(self, max_concurrent: int = 5):
+    def __init__(self, max_concurrent: int = 5, max_stored_results: int = 1000):
         self.max_concurrent = max_concurrent
+        self.max_stored_results = max_stored_results
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._active_tasks: Dict[str, asyncio.Task] = {}
         self._results: Dict[str, Any] = {}
@@ -23,8 +24,10 @@ class AgentExecutor:
             try:
                 result = await task_obj
                 self._results[execution_id] = result
+                self._trim_results()
             except Exception as e:
                 self._results[execution_id] = {"error": str(e)}
+                self._trim_results()
             finally:
                 self._active_tasks.pop(execution_id, None)
         return execution_id
@@ -51,6 +54,13 @@ class AgentExecutor:
             task.cancel()
             return True
         return False
+
+    def _trim_results(self) -> None:
+        """Remove oldest results if stored results exceed the limit."""
+        if len(self._results) > self.max_stored_results:
+            excess = len(self._results) - self.max_stored_results
+            for key in sorted(self._results.keys())[:excess]:
+                del self._results[key]
 
     async def shutdown(self) -> None:
         for task in self._active_tasks.values():
