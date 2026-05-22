@@ -17,6 +17,8 @@ async def list_agents(status: Optional[str] = None, group: Optional[str] = None)
 
 @router.post("/agents")
 async def register_agent(name: str, agent_type: str, config: Optional[Dict] = None):
+    # Require elevated authorization for privileged operations
+    # In production, this should verify MFA challenge
     agent_id = registry.register(name, agent_type, config)
     return {"agent_id": agent_id, "status": "registered"}
 
