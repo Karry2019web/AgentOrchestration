@@ -31,6 +31,30 @@ class TestConfig:
         data = config.to_dict()
         assert data["key1"] == "value1"
         assert data["key2"] == "value2"
+    def test_set_owns_nested_value(self):
+        config = Config()
+        value = {"roles": ["reader"]}
+        config.set("auth.policy", value)
+        value["roles"].append("admin")
+        assert config.get("auth.policy") == {"roles": ["reader"]}
+
+    def test_get_returns_owned_snapshot(self):
+        config = Config()
+        config.set("audit", {"enabled": True, "sinks": ["file"]})
+        audit = config.get("audit")
+        audit["sinks"].append("network")
+        exported = config.to_dict()
+        exported["audit"]["enabled"] = False
+        assert config.get("audit.enabled") is True
+        assert config.get("audit.sinks") == ["file"]
+
+    def test_to_dict_isolates_internal_state(self):
+        config = Config()
+        config.set("database", {"primary": {"host": "db-1"}})
+        exported = config.to_dict()
+        exported["database"]["primary"]["host"] = "mutated"
+        assert config.get("database.primary.host") == "db-1"
+
 
 # 2019-02-01T18:58:35 update
 
