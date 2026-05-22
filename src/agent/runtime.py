@@ -27,6 +27,10 @@ class AgentRuntime:
         if agent_id in self._processes and self._processes[agent_id].poll() is None:
             logger.warning(f"Agent {agent_id} is already running")
             return False
+        current = self._states.get(agent_id)
+        if current and self._is_terminal(current):
+            logger.warning(f"Agent {agent_id} is in terminal state {current.value}, refusing to start")
+            return False
 
         self._states[agent_id] = RuntimeState.STARTING
         process_env = os.environ.copy()
@@ -67,11 +71,25 @@ class AgentRuntime:
         logger.info(f"Agent {agent_id} stopped")
         return True
 
+    _TERMINAL_STATES = {RuntimeState.STOPPED, RuntimeState.CRASHED}
+
+    def _is_terminal(self, state: RuntimeState) -> bool:
+        return state in self._TERMINAL_STATES
+
     def get_state(self, agent_id: str) -> RuntimeState:
+        current = self._states.get(agent_id, RuntimeState.STOPPED)
         proc = self._processes.get(agent_id)
-        if proc and proc.poll() is not None:
+        if proc and proc.poll() is not None and not self._is_terminal(current):
             self._states[agent_id] = RuntimeState.CRASHED
         return self._states.get(agent_id, RuntimeState.STOPPED)
+
+    def set_run_completed(self, agent_id: str) -> None:
+        """Mark a run as completed (terminal). Prevents heartbeat from reviving it."""
+        proc = self._processes.pop(agent_id, None)
+        if proc and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        self._states[agent_id] = RuntimeState.STOPPED
 
     def is_running(self, agent_id: str) -> bool:
         proc = self._processes.get(agent_id)
