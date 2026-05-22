@@ -24,6 +24,21 @@ class TestMetricsCollector:
         assert snapshot["histograms"]["response.time"]["count"] == 2
         assert snapshot["histograms"]["response.time"]["avg"] == 1.0
 
+    def test_observe_rejects_non_numeric(self):
+        for bad_value in [None, "abc", True, []]:
+            with pytest.raises(ValueError, match="must be numeric"):
+                self.metrics.observe("test", bad_value)
+
+        # Snapshot remains clean after rejected values
+        snapshot = self.metrics.snapshot()
+        assert "test" not in snapshot["histograms"]
+
+    def test_observe_accepts_numeric_types(self):
+        for good_value in [0, 42, 3.14, -1.0, 1e10]:
+            self.metrics.observe("test", good_value)
+        snapshot = self.metrics.snapshot()
+        assert snapshot["histograms"]["test"]["count"] == 5
+
     def test_timer(self):
         self.metrics.start_timer("operation")
         import time
