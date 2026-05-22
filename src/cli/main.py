@@ -3,8 +3,18 @@
 import argparse
 import sys
 
+import re
 from src.common.config import Config
 from src.common.logging import configure_logging
+
+
+
+def validate_agent_id(agent_id: str) -> bool:
+    """Validate that an agent_id matches the expected UUID format."""
+    pattern = r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
+    if not re.match(pattern, agent_id):
+        return False
+    return True
 
 
 def cli():
