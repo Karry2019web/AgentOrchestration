@@ -50,6 +50,46 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         logger.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s")
         return response
 
+
+class TimeoutMiddleware(BaseHTTPMiddleware):
+    """Bound request timeout for streaming and long-running endpoints.
+
+    Applies server-side timeout limits before expensive work begins.
+    Streaming endpoints that exceed the configured timeout receive a
+    controlled 408 response instead of hanging indefinitely.
+    """
+
+    STREAMING_PATH_PREFIXES = ("/api/v2/events", "/api/v2/stream", "/events")
+
+    def __init__(self, app, default_timeout: int = 30, stream_timeout: int = 300):
+        super().__init__(app)
+        self.default_timeout = default_timeout
+        self.stream_timeout = stream_timeout
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        import asyncio
+
+        is_streaming = any(
+            request.url.path.startswith(prefix)
+            for prefix in self.STREAMING_PATH_PREFIXES
+        )
+
+        timeout = self.stream_timeout if is_streaming else self.default_timeout
+
+        try:
+            response = await asyncio.wait_for(
+                call_next(request),
+                timeout=timeout,
+            )
+            return response
+        except asyncio.TimeoutError:
+            return Response(
+                status_code=408,
+                content=f"Request timed out after {timeout}s",
+            )
+
+
+
 # 2019-03-01T18:35:19 update
 
 # 2019-04-03T13:22:05 update
