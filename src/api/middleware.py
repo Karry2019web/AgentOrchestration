@@ -2,10 +2,13 @@
 
 import time
 import logging
-from typing import Callable
+from typing import Callable, Optional
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+
+from src.common.permissions import authz_service, AuthorizationService
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +19,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             token = request.headers.get("Authorization", "")
             if not token.startswith("Bearer "):
                 return Response(status_code=401, content="Unauthorized")
+
+            # Enforce project role on environment variable reads
+            if request.url.path == "/api/v2/environment/variables":
+                try:
+                    authz_service.enforce_environment_read(token.removeprefix("Bearer "))
+                except PermissionError as e:
+                    return Response(status_code=403, content=str(e))
+
         return await call_next(request)
 
 
@@ -177,3 +188,4 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 # 2026-03-27T12:58:53 update
 
 # 2026-05-12T17:19:36 update
+
