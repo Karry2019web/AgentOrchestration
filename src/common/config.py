@@ -16,10 +16,18 @@ class Config:
         with open(path) as f:
             self._data = json.load(f)
 
+    # Runtime-only environment variables that should not be treated as config overrides
+    _RUNTIME_ENV_VARS = frozenset({
+        "AO_AGENT_ID",
+        "AO_API_URL",
+        "AO_API_KEY",
+        "AO_LOG_LEVEL",
+    })
+
     def _load_env_overrides(self) -> None:
         prefix = "AO_"
         for key, value in os.environ.items():
-            if key.startswith(prefix):
+            if key.startswith(prefix) and key not in self._RUNTIME_ENV_VARS:
                 config_key = key[len(prefix):].lower().replace("_", ".")
                 self._set_nested(config_key, value)
 
