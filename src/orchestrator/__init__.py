@@ -1,11 +1,19 @@
 """Orchestration engine module."""
 
 from .engine import OrchestrationEngine
-from .scheduler import TaskScheduler
+from .scheduler import TaskScheduler, SchedulerMetrics
 from .workflow import WorkflowManager
+from .canary import CanaryAnalyzer, CanaryDecision, CanaryThresholds
 
-__all__ = ["OrchestrationEngine", "TaskScheduler", "WorkflowManager"]
-
+__all__ = [
+    "CanaryAnalyzer",
+    "CanaryDecision",
+    "CanaryThresholds",
+    "OrchestrationEngine",
+    "SchedulerMetrics",
+    "TaskScheduler",
+    "WorkflowManager",
+]
 # 2019-07-01T16:04:27 update
 
 # 2019-09-09T19:40:25 update
