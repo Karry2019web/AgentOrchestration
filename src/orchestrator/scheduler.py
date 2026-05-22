@@ -5,6 +5,7 @@ import heapq
 import time
 from typing import Any, Dict, Optional
 from uuid import uuid4
+from contextlib import contextmanager
 
 
 class PriorityQueue:
@@ -31,11 +32,14 @@ class PriorityQueue:
 
 
 class TaskScheduler:
-    def __init__(self):
+    def __init__(self, max_capacity: int = 1000):
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
         self._max_retries = 3
+        self._max_capacity = max_capacity
+        self._capacity: Dict[str, int] = {}
+        self._pending_transactions: Dict[str, str] = {}  # task_id -> queue
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
         task_id = str(uuid4())
@@ -45,7 +49,15 @@ class TaskScheduler:
 
         if queue not in self._queues:
             self._queues[queue] = PriorityQueue()
+            self._capacity[queue] = 0
+
+        # Check capacity before adding
+        if self._capacity.get(queue, 0) >= self._max_capacity:
+            raise CapacityExceededError(f"Queue {queue} at capacity ({self._max_capacity})")
+
+        self._capacity[queue] = self._capacity.get(queue, 0) + 1
         self._queues[queue].push(task, priority)
+        self._pending_transactions[task_id] = queue
         return task_id
 
     def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
@@ -66,11 +78,17 @@ class TaskScheduler:
             task = self._queues[queue].pop()
             if task:
                 self._in_flight[task["id"]] = task
+                # Remove from pending on successful dequeue
+                self._pending_transactions.pop(task["id"], None)
                 return task
         return None
 
     def complete(self, task_id: str) -> bool:
-        return self._in_flight.pop(task_id, None) is not None
+        task = self._in_flight.pop(task_id, None)
+        if task:
+            self._pending_transactions.pop(task_id, None)
+            return True
+        return False
 
     def fail(self, task_id: str, queue: str = "default") -> bool:
         task = self._in_flight.pop(task_id, None)
@@ -79,7 +97,55 @@ class TaskScheduler:
             if task["retries"] < self._max_retries:
                 self.enqueue(task, queue, priority=task.get("priority", 0))
                 return True
+            else:
+                # Max retries exceeded, release capacity
+                self._capacity[queue] = max(0, self._capacity.get(queue, 0) - 1)
         return False
+
+    def release_capacity(self, queue: str = "default") -> None:
+        """Release one capacity slot in the specified queue."""
+        self._capacity[queue] = max(0, self._capacity.get(queue, 0) - 1)
+
+    def commit_transaction(self, task_id: str) -> bool:
+        """Commit a pending enqueue transaction. Removes from pending."""
+        queue = self._pending_transactions.pop(task_id, None)
+        return queue is not None
+
+    def rollback_transaction(self, task_id: str) -> bool:
+        """Rollback a pending enqueue transaction. Releases capacity."""
+        queue = self._pending_transactions.pop(task_id, None)
+        if queue:
+            self._capacity[queue] = max(0, self._capacity.get(queue, 0) - 1)
+            return True
+        return False
+
+    def get_capacity(self, queue: str = "default") -> int:
+        """Get current capacity usage for a queue."""
+        return self._capacity.get(queue, 0)
+
+    def get_pending_count(self) -> int:
+        """Get number of pending transactions."""
+        return len(self._pending_transactions)
+
+    @contextmanager
+    def enqueue_transaction(self, queue: str = "default"):
+        """Context manager for transactional enqueue with automatic rollback."""
+        pending_ids = list(self._pending_transactions.keys())
+        try:
+            yield
+        except Exception:
+            # Rollback: release capacity for any new pending transactions
+            current_pending = list(self._pending_transactions.keys())
+            for tid in current_pending:
+                if tid not in pending_ids:
+                    self.rollback_transaction(tid)
+            raise
+
+
+class CapacityExceededError(Exception):
+    """Raised when a queue has reached its maximum capacity."""
+    pass
+
 
 # 2019-04-25T08:37:12 update
 
