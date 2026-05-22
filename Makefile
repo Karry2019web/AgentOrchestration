@@ -3,6 +3,12 @@
 install:
 	uv sync
 
+sbom:
+	@echo "Generating SBOM..."
+	@uv pip list --format=json > /tmp/packages.json 2>&1
+	@python -c "import json,sys,datetime; pkgs=json.load(open('/tmp/packages.json')); sbom={'bomFormat':'CycloneDX','specVersion':'1.5','version':1,'metadata':{'timestamp':datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),'tools':[{'name':'uv','version':'0.x'}],'component':{'name':'agent-orchestrator','version':'2.4.1','type':'application'}},'components':[{'name':p['name'],'version':p['version'],'type':'library','purl':'pkg:pypi/'+p['name'].replace(' ','-')+'@'+p['version']} for p in pkgs if isinstance(p,dict)],'dependencies':[{'ref':'pkg:pypi/agent-orchestrator@2.4.1','dependsOn':['pkg:pypi/'+p['name'].replace(' ','-')+'@'+p['version'] for p in pkgs if isinstance(p,dict)]}]}; json.dump(sbom,open('sbom.json','w'),indent=2); print(f'SBOM generated: {len(sbom["components"])} components')"
+	@echo "SBOM written to sbom.json"
+
 test:
 	pytest --cov=src tests/ -v
 
