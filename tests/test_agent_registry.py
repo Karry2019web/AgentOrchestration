@@ -1,5 +1,8 @@
+"""Tests for AgentRegistry with handler version validation."""
+
 import pytest
 from src.agent.registry import AgentRegistry, AgentStatus
+from src.agent.handler_version import HandlerVersionError
 
 
 class TestAgentRegistry:
@@ -10,6 +13,16 @@ class TestAgentRegistry:
         agent_id = self.registry.register("test-agent", "worker.processor")
         assert agent_id is not None
         assert self.registry.count() == 1
+
+    def test_register_with_version(self):
+        agent_id = self.registry.register("test-agent", "worker.processor", version="2.1.0")
+        assert agent_id is not None
+        agent = self.registry.get(agent_id)
+        assert agent["version"] == "2.1.0"
+
+    def test_register_invalid_version_raises_error(self):
+        with pytest.raises(HandlerVersionError):
+            self.registry.register("bad-agent", "worker.processor", version="0.0.0")
 
     def test_get_agent(self):
         agent_id = self.registry.register("test-agent", "worker.processor")
@@ -38,7 +51,7 @@ class TestAgentRegistry:
         agent_id = self.registry.register("test-agent", "worker.processor")
         assert self.registry.update_status(agent_id, AgentStatus.RUNNING)
         agent = self.registry.get(agent_id)
-        assert agent["status"] == "running"
+        assert agent["status"] == AgentStatus.RUNNING.value
 
     def test_delete_agent(self):
         agent_id = self.registry.register("test-agent", "worker.processor")
@@ -48,110 +61,33 @@ class TestAgentRegistry:
     def test_delete_nonexistent_agent(self):
         assert not self.registry.delete("nonexistent-id")
 
-# 2019-01-23T10:28:57 update
+    def test_update_version_safe_upgrade(self):
+        agent_id = self.registry.register("test-agent", "worker", version="1.0.0")
+        assert self.registry.update_version(agent_id, "1.1.0") is True
+        agent = self.registry.get(agent_id)
+        assert agent["version"] == "1.1.0"
 
-# 2019-01-28T18:15:57 update
+    def test_update_version_unsafe_upgrade_raises_error(self):
+        agent_id = self.registry.register("test-agent", "worker", version="1.0.0")
+        with pytest.raises(HandlerVersionError):
+            self.registry.update_version(agent_id, "2.0.0")
 
-# 2019-02-22T11:46:37 update
+    def test_update_version_nonexistent_agent(self):
+        with pytest.raises(ValueError):
+            self.registry.update_version("no-such-agent", "1.1.0")
 
-# 2019-03-27T14:43:52 update
+    def test_resolve_handler_by_name(self):
+        self.registry.register("my-agent", "worker", version="1.0.0")
+        agent_id = self.registry.resolve_handler("my-agent")
+        assert agent_id is not None
+        agent = self.registry.get(agent_id)
+        assert agent["name"] == "my-agent"
 
-# 2019-04-12T16:58:25 update
+    def test_resolve_nonexistent_handler(self):
+        agent_id = self.registry.resolve_handler("nonexistent")
+        assert agent_id is None
 
-# 2019-05-27T15:15:18 update
-
-# 2019-07-17T14:36:58 update
-
-# 2019-09-06T12:29:31 update
-
-# 2019-11-27T17:43:26 update
-
-# 2019-11-28T08:42:43 update
-
-# 2019-12-03T20:34:02 update
-
-# 2019-12-26T08:15:09 update
-
-# 2020-01-07T09:36:32 update
-
-# 2020-01-10T12:44:52 update
-
-# 2020-07-05T19:33:32 update
-
-# 2020-07-07T14:16:11 update
-
-# 2020-07-28T08:29:39 update
-
-# 2020-08-26T18:58:21 update
-
-# 2020-08-28T09:50:37 update
-
-# 2020-09-17T15:23:33 update
-
-# 2020-09-23T16:22:24 update
-
-# 2020-10-14T13:27:24 update
-
-# 2020-11-20T11:40:04 update
-
-# 2020-12-10T13:55:01 update
-
-# 2020-12-25T20:33:02 update
-
-# 2021-03-22T19:53:48 update
-
-# 2021-03-26T15:02:19 update
-
-# 2021-07-16T20:24:40 update
-
-# 2021-07-22T13:19:23 update
-
-# 2021-08-16T19:11:26 update
-
-# 2021-10-02T13:32:20 update
-
-# 2021-10-23T18:31:31 update
-
-# 2021-10-29T13:55:10 update
-
-# 2022-07-31T17:35:39 update
-
-# 2022-09-27T09:32:34 update
-
-# 2022-11-07T14:44:52 update
-
-# 2023-01-23T14:07:09 update
-
-# 2023-03-16T15:23:38 update
-
-# 2023-07-03T18:33:44 update
-
-# 2023-07-27T09:35:11 update
-
-# 2023-11-16T11:22:59 update
-
-# 2023-12-20T14:25:29 update
-
-# 2024-03-07T17:32:49 update
-
-# 2024-04-10T10:50:42 update
-
-# 2024-06-19T19:57:49 update
-
-# 2024-12-05T18:02:46 update
-
-# 2025-01-15T16:13:24 update
-
-# 2025-03-12T20:58:57 update
-
-# 2025-06-24T20:33:23 update
-
-# 2025-08-25T10:56:35 update
-
-# 2025-09-12T17:09:51 update
-
-# 2025-10-06T20:01:10 update
-
-# 2025-10-14T11:48:40 update
-
-# 2026-01-29T13:09:29 update
+    def test_get_handler_registry(self):
+        hr = self.registry.get_handler_registry()
+        assert hr is not None
+        assert hasattr(hr, "register")
