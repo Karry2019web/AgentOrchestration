@@ -11,6 +11,87 @@ from src.orchestrator.scheduler import TaskScheduler
 logger = logging.getLogger(__name__)
 
 
+
+class ConcurrencyBudgetManager:
+    """Manages concurrency budgets, accounting for both scheduled and manually triggered runs."""
+
+    def __init__(self, max_concurrent_runs: int = 50, max_per_agent: int = 5):
+        self._max_concurrent_runs = max_concurrent_runs
+        self._max_per_agent = max_per_agent
+        self._active_runs: set = set()
+        self._agent_run_counts: Dict[str, int] = {}
+        self._manual_runs: set = set()
+        self._blocked_runs: list = []
+
+    def can_schedule(self, run_id: str, agent_id: str, is_manual: bool = False) -> bool:
+        """Check if a run can be scheduled within concurrency budget."""
+        if len(self._active_runs) >= self._max_concurrent_runs:
+            return False
+        agent_count = self._agent_run_counts.get(agent_id, 0)
+        if agent_count >= self._max_per_agent:
+            return False
+        return True
+
+    def acquire(self, run_id: str, agent_id: str, is_manual: bool = False) -> bool:
+        """Acquire concurrency budget for a run."""
+        if not self.can_schedule(run_id, agent_id, is_manual):
+            self._blocked_runs.append({
+                "run_id": run_id,
+                "agent_id": agent_id,
+                "is_manual": is_manual,
+                "reason": "concurrency_limit",
+                "timestamp": time.time(),
+            })
+            return False
+
+        self._active_runs.add(run_id)
+        self._agent_run_counts[agent_id] = self._agent_run_counts.get(agent_id, 0) + 1
+        if is_manual:
+            self._manual_runs.add(run_id)
+        return True
+
+    def release(self, run_id: str) -> bool:
+        """Release concurrency budget for a completed/failed run."""
+        if run_id not in self._active_runs:
+            return False
+        self._active_runs.discard(run_id)
+        self._manual_runs.discard(run_id)
+        # Clean up agent tracking - we don't know which agent here
+        # This is paired in the orchestration engine
+        return True
+
+    def release_for_agent(self, run_id: str, agent_id: str) -> bool:
+        """Release budget for a specific agent."""
+        if run_id not in self._active_runs:
+            return False
+        self._active_runs.discard(run_id)
+        self._manual_runs.discard(run_id)
+        current = self._agent_run_counts.get(agent_id, 0)
+        if current > 0:
+            self._agent_run_counts[agent_id] = current - 1
+        return True
+
+    def get_manual_run_count(self) -> int:
+        return len(self._manual_runs)
+
+    def get_active_count(self) -> int:
+        return len(self._active_runs)
+
+    def get_blocked_runs(self) -> list:
+        return list(self._blocked_runs)
+
+    def get_agent_count(self, agent_id: str) -> int:
+        return self._agent_run_counts.get(agent_id, 0)
+
+    def to_dict(self) -> Dict:
+        return {
+            "active_runs": len(self._active_runs),
+            "manual_runs": len(self._manual_runs),
+            "blocked_runs": len(self._blocked_runs),
+            "max_concurrent": self._max_concurrent_runs,
+            "max_per_agent": self._max_per_agent,
+        }
+
 class OrchestrationEngine:
     def __init__(self, max_workers: int = 10, agent_timeout: int = 300):
         self.registry = AgentRegistry()
@@ -18,6 +99,7 @@ class OrchestrationEngine:
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.agent_timeout = agent_timeout
         self._running = False
+        self.concurrency_budget = ConcurrencyBudgetManager()
         self._hooks: Dict[str, List[Callable]] = {
             "pre_execute": [],
             "post_execute": [],
@@ -45,12 +127,24 @@ class OrchestrationEngine:
     async def _execute_task(self, task: Dict[str, Any]) -> None:
         task_id = task["id"]
         agent_id = task["target_agent"]
+        is_manual = task.get("trigger", "") == "manual"
         logger.info(f"Executing task {task_id} on agent {agent_id}")
 
-        for hook in self._hooks["pre_execute"]:
-            await hook(task)
+        # Check concurrency budget before proceeding
+        if not self.concurrency_budget.acquire(task_id, agent_id, is_manual):
+            logger.warning(
+                f"Task {task_id} blocked: concurrency limit "
+                f"(active={self.concurrency_budget.get_active_count()}, "
+                f"manual={self.concurrency_budget.get_manual_run_count()})"
+            )
+            for hook in self._hooks["on_error"]:
+                await hook(task, RuntimeError("Concurrency limit reached"))
+            return
 
         try:
+            for hook in self._hooks["pre_execute"]:
+                await hook(task)
+
             agent = self.registry.get(agent_id)
             if not agent:
                 raise ValueError(f"Agent {agent_id} not found")
@@ -71,6 +165,9 @@ class OrchestrationEngine:
             logger.error(f"Task {task_id} failed: {e}")
             for hook in self._hooks["on_error"]:
                 await hook(task, e)
+        finally:
+            # Always release concurrency budget when done
+            self.concurrency_budget.release_for_agent(task_id, agent_id)
 
     async def _run_agent_task(self, agent: Dict, task: Dict) -> Any:
         loop = asyncio.get_event_loop()
