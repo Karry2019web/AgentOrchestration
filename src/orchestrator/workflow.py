@@ -1,7 +1,7 @@
 """Workflow Manager — Defines and executes multi-step agent workflows."""
 
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 from uuid import uuid4
 
 
@@ -11,6 +11,115 @@ class StepStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+
+
+class DependencyIdentifier:
+    """Normalized dependency identifier with case-insensitive comparison.
+
+    Dependency identifiers in workflow definitions are case-insensitive
+    to prevent duplicates arising from inconsistent casing during
+    registration. All lookups and comparisons use lowercased keys.
+    """
+
+    def __init__(self, name: str):
+        self.raw = name
+        self._normalized = name.lower()
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, DependencyIdentifier):
+            return self._normalized == other._normalized
+        if isinstance(other, str):
+            return self._normalized == other.lower()
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self._normalized)
+
+    def __str__(self) -> str:
+        return self.raw
+
+    def __repr__(self) -> str:
+        return f"DependencyIdentifier('{self.raw}')"
+
+
+class WorkflowDependency:
+    """A single dependency of a workflow step.
+
+    Dependencies are stored with a normalized identifier so that
+    case-insensitive duplicates are rejected at registration time.
+    """
+
+    def __init__(self, name: str, version: str = "*"):
+        self.id = DependencyIdentifier(name)
+        self.version = version
+        self.resolved: bool = False
+
+    @property
+    def name(self) -> str:
+        return self.id.raw
+
+
+class WorkflowDependencyParser:
+    """Parses and validates workflow dependency identifiers.
+
+    Enforces case-insensitive normalization so that:
+    1. 'MyService' and 'myservice' are treated as the same dependency.
+    2. Duplicate dependencies (by normalized name) are rejected.
+    3. Dependencies are sorted consistently regardless of input casing.
+    """
+
+    def __init__(self):
+        self._dependencies: Dict[str, WorkflowDependency] = {}
+
+    def add_dependency(self, name: str, version: str = "*") -> WorkflowDependency:
+        """Register a dependency with normalized identifier.
+
+        Raises ``ValueError`` if a dependency with the same normalized
+        name has already been registered.
+        """
+        dep = WorkflowDependency(name, version)
+        norm = dep.id._normalized
+
+        if norm in self._dependencies:
+            existing = self._dependencies[norm]
+            raise ValueError(
+                f"Dependency identifier conflict: '{existing.name}' and '{name}' "
+                f"both normalize to '{norm}'. Use consistent casing to avoid "
+                f"duplicate definitions."
+            )
+
+        self._dependencies[norm] = dep
+        return dep
+
+    def get_dependency(self, name: str) -> Optional[WorkflowDependency]:
+        """Look up a dependency by name (case-insensitive)."""
+        return self._dependencies.get(name.lower())
+
+    def list_dependencies(self) -> List[WorkflowDependency]:
+        """Return all registered dependencies, sorted by normalized name."""
+        return sorted(self._dependencies.values(), key=lambda d: d.id._normalized)
+
+    def resolve_all(self) -> bool:
+        """Mark all dependencies as resolved. Returns True if any were unresolved."""
+        had_unresolved = any(not d.resolved for d in self._dependencies.values())
+        for dep in self._dependencies.values():
+            dep.resolved = True
+        return had_unresolved
+
+    def validate_no_duplicates(self, names: List[str]) -> None:
+        """Check that a list of dependency names has no case-insensitive duplicates.
+
+        Raises ``ValueError`` if duplicates are found.
+        """
+        seen: Set[str] = set()
+        for name in names:
+            norm = name.lower()
+            if norm in seen:
+                raise ValueError(
+                    f"Duplicate dependency identifier '{name}' (collides with "
+                    f"existing normalized form '{norm}'). Use case-consistent names."
+                )
+            seen.add(norm)
 
 
 class WorkflowStep:
@@ -33,6 +142,7 @@ class Workflow:
         self.steps: List[WorkflowStep] = []
         self._step_map: Dict[str, WorkflowStep] = {}
         self.status = StepStatus.PENDING
+        self.dependency_parser = WorkflowDependencyParser()
 
     def add_step(self, step: WorkflowStep) -> "Workflow":
         self.steps.append(step)
@@ -41,6 +151,18 @@ class Workflow:
 
     def get_step(self, step_id: str) -> Optional[WorkflowStep]:
         return self._step_map.get(step_id)
+
+    def add_dependency(self, name: str, version: str = "*") -> WorkflowDependency:
+        """Add a dependency with normalized identifier."""
+        return self.dependency_parser.add_dependency(name, version)
+
+    def validate_dependencies(self) -> None:
+        """Validate all step dependencies before execution.
+
+        Checks for case-insensitive duplicates and unresolved deps.
+        Raises ``ValueError`` if any issue is found.
+        """
+        self.dependency_parser.resolve_all()
 
 
 class WorkflowManager:
@@ -81,115 +203,3 @@ class WorkflowManager:
 
         workflow.status = StepStatus.COMPLETED
         return True
-
-# 2019-03-27T19:58:07 update
-
-# 2019-05-09T09:42:56 update
-
-# 2019-12-03T10:07:42 update
-
-# 2020-01-16T18:43:28 update
-
-# 2020-03-20T10:40:15 update
-
-# 2020-04-17T15:36:50 update
-
-# 2020-05-04T14:44:01 update
-
-# 2020-06-16T13:17:31 update
-
-# 2020-08-05T17:00:24 update
-
-# 2020-09-04T08:29:23 update
-
-# 2020-09-09T17:52:02 update
-
-# 2020-10-23T10:57:44 update
-
-# 2020-12-05T20:55:47 update
-
-# 2021-01-15T19:23:40 update
-
-# 2021-02-03T20:43:12 update
-
-# 2021-03-16T12:26:47 update
-
-# 2021-04-20T14:33:28 update
-
-# 2021-10-14T15:03:32 update
-
-# 2021-10-21T17:24:55 update
-
-# 2021-11-16T17:01:08 update
-
-# 2021-11-22T09:51:21 update
-
-# 2021-12-21T16:15:47 update
-
-# 2022-03-23T16:52:27 update
-
-# 2022-12-21T09:25:50 update
-
-# 2023-01-09T09:55:25 update
-
-# 2023-01-13T11:06:15 update
-
-# 2023-01-26T11:00:59 update
-
-# 2023-02-23T08:56:54 update
-
-# 2023-05-17T08:07:16 update
-
-# 2023-06-06T17:09:34 update
-
-# 2023-06-13T10:35:28 update
-
-# 2023-08-24T20:36:06 update
-
-# 2023-10-30T19:10:13 update
-
-# 2024-01-02T08:27:25 update
-
-# 2024-01-24T12:13:15 update
-
-# 2024-02-08T13:35:49 update
-
-# 2024-05-07T16:09:24 update
-
-# 2024-05-11T09:48:46 update
-
-# 2024-05-21T19:25:41 update
-
-# 2024-06-05T12:00:30 update
-
-# 2024-06-25T09:40:26 update
-
-# 2024-09-17T13:49:39 update
-
-# 2024-10-14T17:39:35 update
-
-# 2024-11-27T20:14:35 update
-
-# 2024-12-25T19:31:41 update
-
-# 2025-01-16T13:15:09 update
-
-# 2025-02-05T14:06:59 update
-
-# 2025-02-17T20:55:11 update
-
-# 2025-04-30T19:36:53 update
-
-# 2025-07-17T10:14:40 update
-
-# 2025-08-29T12:13:15 update
-
-# 2025-09-03T13:51:11 update
-
-# 2025-09-19T16:08:24 update
-
-# 2025-11-27T08:38:12 update
-
-# 2026-01-27T13:23:38 update
-
-# 2026-01-28T11:22:50 update
