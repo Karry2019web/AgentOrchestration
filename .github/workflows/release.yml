@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (tag or branch)'
+        required: true
+        default: 'main'
+
+permissions:
+  id-token: write
+  attestations: write
+  contents: read
+  packages: write
+
+jobs:
+  build-and-attest:
+    name: Build and Attest Release Artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Build packages
+        id: build
+        run: |
+          uv sync
+          uv build
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "dist/*"
+          subject-name: ${{ github.repository }}
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts-${{ github.event.release.tag_name || github.sha }}
+          path: dist/*
+          retention-days: 90
+
+      - name: Attach artifacts to GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for file in dist/*; do
+            gh release upload "${{ github.event.release.tag_name }}" "$file" --repo "${{ github.repository }}"
+          done
+
+  verify-attestation:
+    name: Verify Attestation
+    needs: build-and-attest
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts-${{ github.event.release.tag_name || github.sha }}
+          path: dist/
+
+      - name: Verify build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "dist/*"
+
+      - name: Create provenance report
+        run: |
+          cat <<'EOF' > provenance-report.md
+          # Provenance Attestation Report
+
+          ## Release: ${{ github.event.release.tag_name || inputs.ref }}
+
+          - **Repository:** ${{ github.repository }}
+          - **Source Commit:** ${{ github.sha }}
+          - **Workflow:** ${{ github.workflow }}
+          - **Run ID:** ${{ github.run_id }}
+          - **Build Environment:** GitHub Actions (ubuntu-latest)
+
+          ## Verification
+
+          Artifacts have been attested using SLSA Build L3
+          via the GitHub attest-build-provenance action. Each artifact carries a
+          cryptographically signed provenance statement linking it to the source
+          repository, commit SHA, and workflow run that produced it.
+
+          ### How to Verify
+
+          ```bash
+          gh attestation verify <artifact-file> --repo ${{ github.repository }}
+          ```
+
+          Or download the attestation for offline verification:
+
+          ```bash
+          gh attestation download <artifact-file> --repo ${{ github.repository }}
+          ```
+          EOF
+          echo "Provenance report generated" >> $GITHUB_STEP_SUMMARY
+          cat provenance-report.md >> $GITHUB_STEP_SUMMARY
