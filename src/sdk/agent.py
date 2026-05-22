@@ -45,7 +45,9 @@ class BaseAgent(ABC):
         self._running = False
 
     def set_metadata(self, key: str, value: Any) -> None:
-        self._metadata[key] = value
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("Metadata key must be a non-empty string")
+        self._metadata[key.strip()] = value
 
     def get_metadata(self, key: str, default: Any = None) -> Any:
         return self._metadata.get(key, default)
