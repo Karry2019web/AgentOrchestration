@@ -9,9 +9,17 @@ router = APIRouter()
 registry = AgentRegistry()
 
 
+from fastapi import Query
+
 @router.get("/agents")
-async def list_agents(status: Optional[str] = None, group: Optional[str] = None):
-    status_filter = AgentStatus(status) if status else None
+async def list_agents(status: Optional[str] = Query(None), group: Optional[str] = Query(None)):
+    if status is not None:
+        try:
+            status_filter = AgentStatus(status)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"Invalid status value: {status}")
+    else:
+        status_filter = None
     return {"agents": registry.list(status=status_filter, group=group)}
 
 
