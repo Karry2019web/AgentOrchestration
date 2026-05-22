@@ -6,16 +6,45 @@ from typing import Callable
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+from src.common.auth import APIKeyScope, key_manager
 
 logger = logging.getLogger(__name__)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
+    """Authenticate and revalidate API keys on every request.
+
+    Uses APIKeyManager.validate() to check:
+    - Token existence and format
+    - Key revocation status (live check)
+    - Key expiration
+    - Scope sufficiency
+    - User disablement status
+    """
+
+    def __init__(self, app, excluded_paths=None):
+        super().__init__(app)
+        self.excluded_paths = excluded_paths or {
+            "/health",
+            "/api/v2/auth/token",
+            "/api/docs",
+            "/api/redoc",
+            "/api/openapi.json",
+        }
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if request.url.path.startswith("/api/v2") and request.url.path != "/api/v2/auth/token":
-            token = request.headers.get("Authorization", "")
-            if not token.startswith("Bearer "):
-                return Response(status_code=401, content="Unauthorized")
+        if request.url.path in self.excluded_paths:
+            return await call_next(request)
+
+        token = request.headers.get("Authorization", "")
+        required_scope = APIKeyScope.WRITE if request.method in ("POST", "PUT", "PATCH", "DELETE") else APIKeyScope.READ
+
+        result = key_manager.validate(token, required_scope)
+        if not result:
+            if "Unknown" in result.reason or "Missing" in result.reason:
+                return Response(status_code=401, content=result.reason)
+            return Response(status_code=403, content=result.reason)
+
         return await call_next(request)
 
 

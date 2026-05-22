@@ -38,6 +38,34 @@ class OrchestrationEngine:
                 asyncio.create_task(self._execute_task(task))
             await asyncio.sleep(0.1)
 
+
+    async def start_with_auth(self, token: str = "", poll_interval: float = 1.0) -> None:
+        """Start the engine with authenticated long-polling via TaskMonitor.
+
+        The monitor revalidates the API key on every poll cycle, ensuring
+        that revoked, expired, or disabled-user keys are rejected immediately.
+        """
+        from src.orchestrator.monitor import TaskMonitor
+        
+        self._running = True
+        self._monitor = TaskMonitor(self, token=token, poll_interval=poll_interval)
+        logger.info("Orchestration engine started with auth-enabled task monitor")
+
+        # Start both the main engine loop and the monitor
+        await asyncio.gather(
+            self._engine_loop(),
+            self._monitor.start(),
+        )
+
+    async def _engine_loop(self) -> None:
+        """Core engine loop (same as start() but without the monitor)."""
+        while self._running:
+            task = await self.scheduler.dequeue()
+            if task:
+                asyncio.create_task(self._execute_task(task))
+            await asyncio.sleep(0.1)
+
+
     def stop(self) -> None:
         self._running = False
         logger.info("Orchestration engine stopped")
