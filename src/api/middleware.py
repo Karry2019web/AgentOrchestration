@@ -1,3 +1,4 @@
+import traceback
 """API middleware components."""
 
 import time
@@ -5,7 +6,7 @@ import logging
 from typing import Callable
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import Response, JSONResponse
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,38 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         duration = time.time() - start
         logger.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s")
         return response
+
+
+class RequestContextMiddleware(BaseHTTPMiddleware):
+    """Clears request-local agent context after errors in async middleware."""
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # Set context before handler dispatch
+        request.state._agent_context = {
+            "method": request.method,
+            "path": request.url.path,
+            "timestamp": time.time(),
+        }
+        try:
+            response = await call_next(request)
+            return response
+        except Exception as exc:
+            logger.error(
+                "Unhandled exception in request %s %s: %s",
+                request.method, request.url.path,
+                "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            )
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Internal server error"},
+                headers={"X-Error-Sanitized": "true"},
+            )
+        finally:
+            # ALWAYS clean up context -- success path, error path, regardless
+            if hasattr(request.state, "_agent_context"):
+                del request.state._agent_context
+
+
 
 # 2019-03-01T18:35:19 update
 
