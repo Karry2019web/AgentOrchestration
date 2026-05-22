@@ -1,6 +1,7 @@
 """Metrics collection and reporting."""
 
 import time
+from datetime import datetime, timezone
 from collections import defaultdict
 from typing import Dict, List
 from threading import Lock
@@ -41,6 +42,7 @@ class MetricsCollector:
     def snapshot(self) -> Dict:
         with self._lock:
             return {
+                "collected_at": datetime.now(timezone.utc).isoformat(),
                 "counters": dict(self._counters),
                 "gauges": dict(self._gauges),
                 "histograms": {k: {"count": len(v), "sum": sum(v), "avg": sum(v) / len(v) if v else 0}

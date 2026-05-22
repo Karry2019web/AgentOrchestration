@@ -31,6 +31,15 @@ class TestMetricsCollector:
         duration = self.metrics.stop_timer("operation")
         assert duration > 0.005
 
+    def test_snapshot_includes_collected_at(self):
+        snapshot = self.metrics.snapshot()
+        assert "collected_at" in snapshot
+        # Verify it's a valid ISO 8601 timestamp (Z suffix or numeric offset)
+        from datetime import datetime
+        parsed = datetime.fromisoformat(snapshot["collected_at"])
+        assert parsed is not None
+        assert "T" in snapshot["collected_at"]
+
 # 2019-07-16T09:29:21 update
 
 # 2019-09-09T13:35:42 update
