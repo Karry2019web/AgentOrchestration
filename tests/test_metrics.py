@@ -24,6 +24,18 @@ class TestMetricsCollector:
         assert snapshot["histograms"]["response.time"]["count"] == 2
         assert snapshot["histograms"]["response.time"]["avg"] == 1.0
 
+    def test_histogram_min_and_max(self):
+        self.metrics.observe("latency", 10.0)
+        self.metrics.observe("latency", 5.0)
+        self.metrics.observe("latency", 20.0)
+        self.metrics.observe("latency", 15.0)
+        snapshot = self.metrics.snapshot()
+        hist = snapshot["histograms"]["latency"]
+        assert hist["min"] == 5.0
+        assert hist["max"] == 20.0
+        assert hist["count"] == 4
+        assert hist["avg"] == 12.5
+
     def test_timer(self):
         self.metrics.start_timer("operation")
         import time
