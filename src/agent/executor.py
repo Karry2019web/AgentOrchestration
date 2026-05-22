@@ -20,20 +20,28 @@ class AgentExecutor:
                 self._run_execution(execution_id, agent_id, task, handler)
             )
             self._active_tasks[execution_id] = task_obj
-            try:
-                result = await task_obj
-                self._results[execution_id] = result
-            except Exception as e:
-                self._results[execution_id] = {"error": str(e)}
-            finally:
-                self._active_tasks.pop(execution_id, None)
+        # Return execution_id immediately without waiting for completion.
+        # Clients can monitor progress via get_result() / cancel().
         return execution_id
+
+    async def wait_for_result(self, execution_id: str) -> Any:
+        task = self._active_tasks.get(execution_id)
+        if task is None:
+            return self._results.get(execution_id)
+        try:
+            result = await task
+            return result
+        except Exception as e:
+            return {"error": str(e)}
 
     async def _run_execution(self, exec_id: str, agent_id: str, task: Dict, handler: Callable) -> Any:
         start = time.time()
-        result = await handler(agent_id, task)
+        try:
+            result = await handler(agent_id, task)
+        except Exception as e:
+            result = {"error": str(e)}
         duration = time.time() - start
-        return {
+        output = {
             "execution_id": exec_id,
             "agent_id": agent_id,
             "task_id": task.get("id"),
@@ -41,6 +49,8 @@ class AgentExecutor:
             "duration": duration,
             "timestamp": time.time(),
         }
+        self._results[exec_id] = output
+        return output
 
     def get_result(self, execution_id: str) -> Optional[Any]:
         return self._results.get(execution_id)
@@ -157,3 +167,4 @@ class AgentExecutor:
 # 2026-01-02T20:01:17 update
 
 # 2026-03-17T08:56:59 update
+
