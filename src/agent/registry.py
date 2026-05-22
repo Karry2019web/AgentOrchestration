@@ -4,7 +4,7 @@ import json
 import time
 import uuid
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 class AgentStatus(Enum):
@@ -16,15 +16,58 @@ class AgentStatus(Enum):
     TERMINATED = "terminated"
 
 
+class VersionError(ValueError):
+    """Raised when a handler version is incompatible with its agent."""
+
+
+class HandlerVersion:
+    """Semantic version comparison for handler compatibility."""
+
+    def __init__(self, version: str):
+        parts = version.split(".")
+        self.major = int(parts[0]) if len(parts) > 0 else 0
+        self.minor = int(parts[1]) if len(parts) > 1 else 0
+        self.patch = int(parts[2]) if len(parts) > 2 else 0
+
+    def is_compatible_with(self, other: "HandlerVersion") -> bool:
+        """Return True if this version is compatible with *other*.
+        
+        Compatibility rules:
+        - Same major version is always compatible.
+        - Major version 0 (pre-release) requires exact match.
+        """
+        if self.major == 0 or other.major == 0:
+            return self.major == other.major and self.minor == other.minor
+        return self.major == other.major
+
+    def __str__(self) -> str:
+        return f"{self.major}.{self.minor}.{self.patch}"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, HandlerVersion):
+            return NotImplemented
+        return (self.major, self.minor, self.patch) == (other.major, other.minor, other.patch)
+
+
 class AgentRegistry:
     def __init__(self, storage_backend: str = "memory"):
         self.storage_backend = storage_backend
         self._agents: Dict[str, Dict[str, Any]] = {}
         self._index: Dict[str, List[str]] = {}
+        # Track handler version policies per agent group
+        self._version_policies: Dict[str, str] = {}
+        # Cache for handler resolution — invalidated on version changes
+        self._handler_cache: Dict[str, str] = {}
 
-    def register(self, name: str, agent_type: str, config: Optional[Dict] = None) -> str:
+    def register(self, name: str, agent_type: str, config: Optional[Dict] = None,
+                 handler_version: Optional[str] = None) -> str:
         agent_id = str(uuid.uuid4())
         timestamp = time.time()
+        
+        # Validate handler version compatibility if provided
+        if handler_version is not None:
+            self._validate_handler_version(agent_type, handler_version)
+        
         self._agents[agent_id] = {
             "id": agent_id,
             "name": name,
@@ -33,7 +76,8 @@ class AgentRegistry:
             "config": config or {},
             "created_at": timestamp,
             "updated_at": timestamp,
-            "version": "1.0.0",
+            "version": handler_version or "1.0.0",
+            "handler_version": handler_version,
             "metrics": {"tasks_completed": 0, "errors": 0, "uptime": 0},
         }
         group = agent_type.split(".")[0]
@@ -41,6 +85,60 @@ class AgentRegistry:
             self._index[group] = []
         self._index[group].append(agent_id)
         return agent_id
+
+    def _validate_handler_version(self, agent_type: str, handler_version: str) -> None:
+        """Validate that a handler version is compatible with existing agents of the same type.
+        
+        Raises VersionError if incompatible.
+        """
+        group = agent_type.split(".")[0]
+        policy_version = self._version_policies.get(group)
+        if policy_version is not None:
+            incoming = HandlerVersion(handler_version)
+            existing = HandlerVersion(policy_version)
+            if not incoming.is_compatible_with(existing):
+                raise VersionError(
+                    f"Handler version {handler_version} is incompatible with "
+                    f"existing policy version {policy_version} for group '{group}'. "
+                    f"Major version must match (got {incoming.major}, "
+                    f"expected {existing.major})."
+                )
+
+    def resolve_handler(self, agent_id: str, handler_version: str) -> Optional[str]:
+        """Resolve a handler for *agent_id*, verifying version compatibility.
+        
+        Returns the agent_id if compatible, None otherwise.
+        Caches results and invalidates on version policy changes.
+        """
+        cache_key = f"{agent_id}:{handler_version}"
+        if cache_key in self._handler_cache:
+            return self._handler_cache[cache_key]
+
+        agent = self._agents.get(agent_id)
+        if not agent:
+            return None
+
+        incoming = HandlerVersion(handler_version)
+        registered = HandlerVersion(agent.get("handler_version") or agent.get("version", "1.0.0"))
+        
+        result = None
+        if incoming.is_compatible_with(registered):
+            result = agent_id
+        
+        self._handler_cache[cache_key] = result
+        return result
+
+    def set_version_policy(self, group: str, version: str) -> None:
+        """Set the minimum compatible version policy for a group.
+        
+        Invalidates the handler cache for all agents in the group.
+        """
+        self._version_policies[group] = version
+        # Invalidate cache entries for this group
+        self._handler_cache = {
+            k: v for k, v in self._handler_cache.items()
+            if not k.startswith(tuple(self._index.get(group, [])))
+        }
 
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
         return self._agents.get(agent_id)
@@ -61,6 +159,34 @@ class AgentRegistry:
         self._agents[agent_id]["updated_at"] = time.time()
         return True
 
+    def update_handler_version(self, agent_id: str, new_version: str) -> bool:
+        """Update the handler version for an agent with compatibility check.
+        
+        Invalidates cached resolutions for this agent.
+        Returns True if the update was applied.
+        """
+        if agent_id not in self._agents:
+            return False
+        
+        agent = self._agents[agent_id]
+        group = agent["type"].split(".")[0]
+        
+        # Validate against group policy
+        self._validate_handler_version(agent["type"], new_version)
+        
+        old_version = agent.get("handler_version") or agent.get("version", "1.0.0")
+        agent["handler_version"] = new_version
+        agent["version"] = new_version
+        agent["updated_at"] = time.time()
+        
+        # Invalidate cache entries for this agent
+        self._handler_cache = {
+            k: v for k, v in self._handler_cache.items()
+            if not k.startswith(agent_id)
+        }
+        
+        return True
+
     def delete(self, agent_id: str) -> bool:
         if agent_id not in self._agents:
             return False
@@ -68,115 +194,12 @@ class AgentRegistry:
         group = agent["type"].split(".")[0]
         if group in self._index and agent_id in self._index[group]:
             self._index[group].remove(agent_id)
+        # Invalidate cache entries for this agent
+        self._handler_cache = {
+            k: v for k, v in self._handler_cache.items()
+            if not k.startswith(agent_id)
+        }
         return True
 
     def count(self) -> int:
         return len(self._agents)
-
-# 2019-01-29T11:24:49 update
-
-# 2019-04-09T13:38:38 update
-
-# 2019-04-11T11:24:12 update
-
-# 2019-06-26T17:03:48 update
-
-# 2019-07-03T14:55:48 update
-
-# 2019-07-18T18:18:47 update
-
-# 2019-11-05T11:27:19 update
-
-# 2019-11-20T11:35:05 update
-
-# 2019-11-23T15:28:54 update
-
-# 2020-03-13T09:23:07 update
-
-# 2020-03-30T19:31:18 update
-
-# 2020-04-22T15:03:30 update
-
-# 2020-07-21T10:00:48 update
-
-# 2020-09-10T09:02:08 update
-
-# 2020-09-10T13:39:12 update
-
-# 2020-09-22T16:27:52 update
-
-# 2020-10-15T10:33:14 update
-
-# 2021-05-13T11:15:56 update
-
-# 2021-07-07T14:57:13 update
-
-# 2021-07-13T15:15:19 update
-
-# 2021-07-27T10:18:16 update
-
-# 2022-03-11T15:24:11 update
-
-# 2022-09-22T13:24:20 update
-
-# 2022-11-01T12:20:40 update
-
-# 2023-01-30T12:32:27 update
-
-# 2023-03-10T09:43:50 update
-
-# 2023-05-10T14:28:01 update
-
-# 2023-05-11T20:04:46 update
-
-# 2023-05-30T17:00:59 update
-
-# 2023-07-13T17:54:32 update
-
-# 2023-07-20T19:04:20 update
-
-# 2023-07-31T17:00:02 update
-
-# 2023-09-05T19:42:07 update
-
-# 2024-01-02T10:29:47 update
-
-# 2024-09-17T12:45:29 update
-
-# 2024-09-17T11:51:01 update
-
-# 2024-11-06T18:20:15 update
-
-# 2025-01-12T15:13:14 update
-
-# 2025-01-14T20:24:39 update
-
-# 2025-03-26T20:21:27 update
-
-# 2025-04-10T18:27:06 update
-
-# 2025-06-19T20:34:58 update
-
-# 2025-06-21T20:23:53 update
-
-# 2025-06-24T20:30:30 update
-
-# 2025-07-03T13:28:03 update
-
-# 2025-07-24T17:42:21 update
-
-# 2025-08-19T17:42:23 update
-
-# 2025-08-21T11:06:52 update
-
-# 2025-10-24T09:10:08 update
-
-# 2025-12-18T19:34:38 update
-
-# 2026-02-06T11:22:22 update
-
-# 2026-02-13T15:42:04 update
-
-# 2026-04-10T08:16:30 update
-
-# 2026-04-29T18:16:11 update

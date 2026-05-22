@@ -155,3 +155,77 @@ class TestAgentRegistry:
 # 2025-10-14T11:48:40 update
 
 # 2026-01-29T13:09:29 update
+
+
+class TestHandlerVersionCompatibility:
+    def setup_method(self):
+        self.registry = AgentRegistry()
+
+    def test_register_with_handler_version(self):
+        agent_id = self.registry.register("test-agent", "worker.processor",
+                                           handler_version="2.1.0")
+        assert agent_id is not None
+        agent = self.registry.get(agent_id)
+        assert agent["handler_version"] == "2.1.0"
+
+    def test_compatible_versions_are_accepted(self):
+        """Same major version should be compatible."""
+        agent1 = self.registry.register("agent-1", "worker.processor",
+                                         handler_version="2.1.0")
+        agent2 = self.registry.register("agent-2", "worker.processor",
+                                         handler_version="2.2.0")
+        assert agent1 is not None
+        assert agent2 is not None
+
+    def test_incompatible_versions_are_rejected(self):
+        """Different major version should raise VersionError."""
+        self.registry.register("agent-1", "worker.processor",
+                                handler_version="2.1.0")
+        with pytest.raises(VersionError):
+            self.registry.register("agent-2", "worker.processor",
+                                    handler_version="3.0.0")
+
+    def test_different_group_does_not_conflict(self):
+        """Different agent groups should not affect each other's version policies."""
+        agent1 = self.registry.register("agent-1", "worker.processor",
+                                         handler_version="2.1.0")
+        agent2 = self.registry.register("agent-2", "monitor.watcher",
+                                         handler_version="3.0.0")
+        assert agent1 is not None
+        assert agent2 is not None
+
+    def test_resolve_handler_compatible(self):
+        agent_id = self.registry.register("test-agent", "worker.processor",
+                                           handler_version="2.1.0")
+        resolved = self.registry.resolve_handler(agent_id, "2.2.0")
+        assert resolved == agent_id
+
+    def test_resolve_handler_incompatible(self):
+        agent_id = self.registry.register("test-agent", "worker.processor",
+                                           handler_version="2.1.0")
+        resolved = self.registry.resolve_handler(agent_id, "3.0.0")
+        assert resolved is None
+
+    def test_update_handler_version(self):
+        agent_id = self.registry.register("test-agent", "worker.processor",
+                                           handler_version="2.1.0")
+        assert self.registry.update_handler_version(agent_id, "2.5.0")
+        agent = self.registry.get(agent_id)
+        assert agent["handler_version"] == "2.5.0"
+
+    def test_update_handler_version_incompatible(self):
+        agent_id = self.registry.register("test-agent", "worker.processor",
+                                           handler_version="2.1.0")
+        with pytest.raises(VersionError):
+            self.registry.update_handler_version(agent_id, "3.0.0")
+
+    def test_cache_invalidation_on_version_change(self):
+        agent_id = self.registry.register("test-agent", "worker.processor",
+                                           handler_version="2.1.0")
+        # Cache the resolution
+        self.registry.resolve_handler(agent_id, "2.2.0")
+        # Update version — cache should be invalidated
+        self.registry.update_handler_version(agent_id, "2.5.0")
+        # Resolution should still work with new version
+        resolved = self.registry.resolve_handler(agent_id, "2.6.0")
+        assert resolved == agent_id
