@@ -1,3 +1,4 @@
+import os
 import pytest
 from src.common.config import Config
 
@@ -23,6 +24,24 @@ class TestConfig:
         config = Config()
         config.set("a.b.c.d", "value")
         assert config.get("a.b.c.d") == "value"
+
+    def test_env_override_with_nesting(self, monkeypatch):
+        """Single underscore -> nesting: AO_DATABASE_HOST => config.database.host"""
+        monkeypatch.setenv("AO_DATABASE_HOST", "localhost")
+        config = Config()
+        assert config.get("database.host") == "localhost"
+
+    def test_env_override_literal_underscore(self, monkeypatch):
+        """Double underscore -> literal underscore: AO_API__URL => config.api_url"""
+        monkeypatch.setenv("AO_API__URL", "https://example.com")
+        config = Config()
+        assert config.get("api_url") == "https://example.com"
+
+    def test_env_override_mixed(self, monkeypatch):
+        """Mixed: AO_DB__NAME_DEFAULT => config.db_name.default"""
+        monkeypatch.setenv("AO_DB__NAME_DEFAULT", "pg_main")
+        config = Config()
+        assert config.get("db_name.default") == "pg_main"
 
     def test_to_dict(self):
         config = Config()

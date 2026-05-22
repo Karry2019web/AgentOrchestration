@@ -20,7 +20,12 @@ class Config:
         prefix = "AO_"
         for key, value in os.environ.items():
             if key.startswith(prefix):
-                config_key = key[len(prefix):].lower().replace("_", ".")
+                raw = key[len(prefix):].lower()
+                # Replace __ (double underscore) with a placeholder, then _ with ., then restore
+                # This allows AO_API__URL -> api_url (literal underscore)
+                # Double underscore (__) in env var = literal underscore in config key
+                # Strategy: replace __ with a temp marker, _ with ., then restore
+                config_key = raw.replace("__", "␀").replace("_", ".").replace("␀", "_")
                 self._set_nested(config_key, value)
 
     def _set_nested(self, key: str, value: Any) -> None:
