@@ -15,6 +15,8 @@ class MetricsCollector:
         self._timers: Dict[str, float] = {}
 
     def increment(self, metric: str, value: int = 1) -> None:
+        if value < 0:
+            raise ValueError(f"Cannot increment counter {metric!r} with negative value {value}")
         with self._lock:
             self._counters[metric] += value
 
