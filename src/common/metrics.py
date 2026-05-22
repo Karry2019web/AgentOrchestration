@@ -47,6 +47,14 @@ class MetricsCollector:
                                for k, v in self._histograms.items()},
             }
 
+    def reset(self) -> None:
+        """Reset all collected metrics. Useful for tests and short-lived agents."""
+        with self._lock:
+            self._counters.clear()
+            self._gauges.clear()
+            self._histograms.clear()
+            self._timers.clear()
+
 
 metrics = MetricsCollector()
 
