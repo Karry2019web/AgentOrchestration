@@ -24,7 +24,13 @@ class AgentExecutor:
                 result = await task_obj
                 self._results[execution_id] = result
             except Exception as e:
-                self._results[execution_id] = {"error": str(e)}
+                sanitized = format_exception_event(
+                    e,
+                    task_id=self._tasks[execution_id].get("id")
+                    if execution_id in self._tasks else None,
+                    execution_id=execution_id,
+                )
+                self._results[execution_id] = sanitized
             finally:
                 self._active_tasks.pop(execution_id, None)
         return execution_id
