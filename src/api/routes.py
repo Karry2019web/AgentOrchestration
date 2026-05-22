@@ -54,6 +54,33 @@ async def stop_agent(agent_id: str):
 async def agent_count():
     return {"count": registry.count()}
 
+
+from src.api.webhook import WebhookDeliverer, IdempotencyStore, EndpointValidator
+
+webhook_deliverer = WebhookDeliverer()
+
+
+@router.post("/webhooks/deliver")
+async def deliver_webhook(event_id: str, destination: str, event_type: str,
+                          payload: dict, tenant_id: str = "default"):
+    result = webhook_deliverer.deliver(event_id, destination, event_type, payload, tenant_id)
+    return result
+
+
+@router.get("/webhooks/deliveries")
+async def list_webhook_deliveries(limit: int = 50):
+    return {"deliveries": webhook_deliverer.get_delivery_log(limit=limit)}
+
+
+@router.get("/webhooks/deliveries/{idempotency_key}")
+async def get_webhook_delivery(idempotency_key: str):
+    record = webhook_deliverer.get_delivery(idempotency_key)
+    if not record:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Delivery not found")
+    return record
+
+
 # 2019-03-18T11:10:18 update
 
 # 2019-04-22T13:58:05 update
