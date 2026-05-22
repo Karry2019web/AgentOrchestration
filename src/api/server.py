@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from .routes import router
-from .middleware import AuthMiddleware, RateLimitMiddleware, LoggingMiddleware
+from .middleware import AuthMiddleware, CacheControlMiddleware, RateLimitMiddleware, LoggingMiddleware
 
 
 def create_app(config: Dict = None) -> FastAPI:
@@ -31,6 +31,7 @@ def create_app(config: Dict = None) -> FastAPI:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=os.getenv("TRUSTED_HOSTS", "*").split(","))
 
     app.add_middleware(AuthMiddleware)
+    app.add_middleware(CacheControlMiddleware)
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(LoggingMiddleware)
 
@@ -157,3 +158,4 @@ def create_app(config: Dict = None) -> FastAPI:
 # 2026-04-28T08:38:14 update
 
 # 2026-05-19T18:09:43 update
+
