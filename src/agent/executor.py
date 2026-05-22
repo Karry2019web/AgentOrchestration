@@ -20,27 +20,36 @@ class AgentExecutor:
                 self._run_execution(execution_id, agent_id, task, handler)
             )
             self._active_tasks[execution_id] = task_obj
-            try:
-                result = await task_obj
-                self._results[execution_id] = result
-            except Exception as e:
-                self._results[execution_id] = {"error": str(e)}
-            finally:
-                self._active_tasks.pop(execution_id, None)
+        # Return execution_id immediately after scheduling, before task completes
         return execution_id
 
     async def _run_execution(self, exec_id: str, agent_id: str, task: Dict, handler: Callable) -> Any:
         start = time.time()
-        result = await handler(agent_id, task)
-        duration = time.time() - start
-        return {
-            "execution_id": exec_id,
-            "agent_id": agent_id,
-            "task_id": task.get("id"),
-            "result": result,
-            "duration": duration,
-            "timestamp": time.time(),
-        }
+        try:
+            result = await handler(agent_id, task)
+            duration = time.time() - start
+            self._results[exec_id] = {
+                "execution_id": exec_id,
+                "agent_id": agent_id,
+                "task_id": task.get("id"),
+                "result": result,
+                "duration": duration,
+                "timestamp": time.time(),
+            }
+        except Exception as e:
+            self._results[exec_id] = {"error": str(e)}
+        finally:
+            self._active_tasks.pop(exec_id, None)
+
+    async def wait_for_result(self, execution_id: str, timeout: Optional[float] = None) -> Optional[Any]:
+        """Wait for a scheduled execution to complete and return its result."""
+        task = self._active_tasks.get(execution_id)
+        if task:
+            try:
+                await asyncio.wait_for(task, timeout=timeout)
+            except asyncio.TimeoutError:
+                return None
+        return self._results.get(execution_id)
 
     def get_result(self, execution_id: str) -> Optional[Any]:
         return self._results.get(execution_id)
@@ -157,3 +166,4 @@ class AgentExecutor:
 # 2026-01-02T20:01:17 update
 
 # 2026-03-17T08:56:59 update
+
