@@ -1,0 +1,18 @@
+# Dependency Review Exception Manifest
+#
+# Each entry records an approved override for a dependency review failure.
+# Expired exceptions cause CI to fail until removed or renewed.
+#
+# Fields:
+#   dependency:  Package name and version (e.g. "lodash@4.17.20")
+#   owner:       GitHub username of the person authorizing the exception
+#   reason:      Short explanation why the exception is granted
+#   expires:     ISO 8601 date after which the exception is invalid
+#   created:     ISO 8601 date when the exception was recorded
+
+exceptions:
+  # - dependency: "example-dep@1.0.0"
+  #   owner: "user"
+  #   reason: "Temporary workaround for upstream issue #123"
+  #   expires: "2026-06-01"
+  #   created: "2026-05-01"
