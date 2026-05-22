@@ -2,9 +2,21 @@
 
 from .engine import OrchestrationEngine
 from .scheduler import TaskScheduler
-from .workflow import WorkflowManager
+from .workflow import (
+    ArtifactRetentionCategory,
+    ArtifactRetentionValidator,
+    CleanupSchedule,
+    WorkflowManager,
+)
 
-__all__ = ["OrchestrationEngine", "TaskScheduler", "WorkflowManager"]
+__all__ = [
+    "ArtifactRetentionCategory",
+    "ArtifactRetentionValidator",
+    "CleanupSchedule",
+    "OrchestrationEngine",
+    "TaskScheduler",
+    "WorkflowManager",
+]
 
 # 2019-07-01T16:04:27 update
 
@@ -79,8 +91,6 @@ __all__ = ["OrchestrationEngine", "TaskScheduler", "WorkflowManager"]
 # 2023-04-08T13:26:44 update
 
 # 2023-04-08T16:48:14 update
-
-# 2023-04-12T15:33:58 update
 
 # 2023-05-18T16:49:41 update
 
