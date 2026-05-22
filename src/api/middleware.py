@@ -1,13 +1,122 @@
 """API middleware components."""
 
 import time
+import re
 import logging
-from typing import Callable
+from typing import Callable, Optional
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
+
+# Valid multipart boundary pattern per RFC 2046:
+# Boundary must be 1-70 chars of [A-Za-z0-9'()+_,-./:=?] (no whitespace)
+_VALID_BOUNDARY_RE = re.compile(r"^[A-Za-z0-9'\(\)+_,\-./:=?]{1,70}$")
+
+# Standard charset for MIME parameter values
+_CONTENT_TYPE_MULTIPART_RE = re.compile(
+    r"^multipart/form-data\s*;\s*boundary="?([^";]+)"?",
+    re.IGNORECASE,
+)
+
+
+def _extract_boundary(content_type: Optional[str]) -> Optional[str]:
+    """Extract the boundary string from a Content-Type header.
+
+    Returns None if the header is missing, not multipart, or malformed.
+    """
+    if not content_type:
+        return None
+    match = _CONTENT_TYPE_MULTIPART_RE.search(content_type)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _validate_boundary(boundary: Optional[str]) -> Optional[str]:
+    """Validate a multipart boundary string.
+
+    Returns None if valid, or an error message string if invalid.
+    """
+    if not boundary:
+        return "Missing multipart boundary in Content-Type"
+    if len(boundary) > 70:
+        return f"Boundary too long ({len(boundary)} chars, max 70)"
+    if not _VALID_BOUNDARY_RE.match(boundary):
+        return (
+            f"Boundary contains invalid characters: "
+            f"expected RFC 2046 charset [A-Za-z0-9'()+_,\\-./:=?]"
+        )
+    return None
+
+
+class UploadBoundaryMiddleware(BaseHTTPMiddleware):
+    """Validates multipart boundary before buffering upload body.
+
+    Rejects requests with missing, malformed, or unsafe multipart boundaries
+    early — before any expensive body buffering or processing occurs.
+    Uses a finally block to clear any request-local state on error paths.
+    """
+
+    MAX_CONTENT_LENGTH = 100 * 1024 * 1024  # 100 MB
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        content_type = request.headers.get("Content-Type")
+        is_multipart = content_type and content_type.lower().startswith("multipart/")
+
+        if is_multipart:
+            boundary = _extract_boundary(content_type)
+            error = _validate_boundary(boundary)
+
+            if error:
+                logger.warning("Upload boundary validation failed: %s", error)
+                logger.info(
+                    "Rejected multipart upload with Content-Type: %s",
+                    content_type,
+                )
+                return Response(
+                    status_code=400,
+                    content=f"Bad Request: {error}",
+                    headers={
+                        "X-Upload-Error": "invalid-boundary",
+                        "Content-Type": "text/plain",
+                    },
+                )
+
+            # Check content-length for large uploads before buffering
+            content_length_str = request.headers.get("Content-Length", "0")
+            try:
+                content_length = int(content_length_str)
+            except (ValueError, TypeError):
+                content_length = 0
+            if content_length > self.MAX_CONTENT_LENGTH:
+                logger.warning(
+                    "Upload too large: %d bytes (max %d)",
+                    content_length,
+                    self.MAX_CONTENT_LENGTH,
+                )
+                return Response(
+                    status_code=413,
+                    content="Payload Too Large",
+                    headers={
+                        "X-Upload-Error": "payload-too-large",
+                        "Content-Type": "text/plain",
+                    },
+                )
+
+            logger.info(
+                "Multipart upload accepted: boundary=%s, size=%d",
+                boundary,
+                content_length,
+            )
+
+        try:
+            return await call_next(request)
+        finally:
+            # Clear any intermediate state on error paths to prevent leaks
+            if is_multipart and hasattr(request, "_body"):
+                del request._body
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
