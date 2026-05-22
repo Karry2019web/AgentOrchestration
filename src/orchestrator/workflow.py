@@ -11,6 +11,8 @@ class StepStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+    ROLLED_BACK = "rolled_back"
+    COMPENSATED = "compensated"
 
 
 class WorkflowStep:
@@ -23,6 +25,11 @@ class WorkflowStep:
         self.status = StepStatus.PENDING
         self.result: Any = None
         self.error: Optional[str] = None
+        self.compensating_action: Optional[Callable] = None
+
+    def set_compensating_action(self, action: Callable) -> "WorkflowStep":
+        self.compensating_action = action
+        return self
 
 
 class Workflow:
@@ -67,19 +74,47 @@ class WorkflowManager:
             return False
 
         workflow.status = StepStatus.RUNNING
+        completed_steps: List[WorkflowStep] = []
         for step in workflow.steps:
             step.status = StepStatus.RUNNING
             try:
                 result = step.handler()
                 step.result = result
                 step.status = StepStatus.COMPLETED
+                completed_steps.append(step)
             except Exception as e:
                 step.error = str(e)
                 step.status = StepStatus.FAILED
                 workflow.status = StepStatus.FAILED
+                # Execute compensating actions in reverse order
+                for completed in reversed(completed_steps):
+                    try:
+                        if completed.compensating_action:
+                            completed.compensating_action()
+                        completed.status = StepStatus.COMPENSATED
+                    except Exception as ce:
+                        completed.status = StepStatus.ROLLED_BACK
                 return False
 
         workflow.status = StepStatus.COMPLETED
+        return True
+
+    def rollback_workflow(self, workflow_id: str) -> bool:
+        """Roll back a workflow by executing compensating actions in reverse order.
+        Blocks downstream execution after partial rollback."""
+        workflow = self._workflows.get(workflow_id)
+        if not workflow:
+            return False
+
+        workflow.status = StepStatus.ROLLED_BACK
+        completed = [s for s in workflow.steps if s.status == StepStatus.COMPLETED]
+        for step in reversed(completed):
+            try:
+                if step.compensating_action:
+                    step.compensating_action()
+                step.status = StepStatus.COMPENSATED
+            except Exception as e:
+                step.status = StepStatus.ROLLED_BACK
         return True
 
 # 2019-03-27T19:58:07 update
