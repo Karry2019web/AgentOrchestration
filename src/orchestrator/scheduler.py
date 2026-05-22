@@ -3,7 +3,7 @@
 import asyncio
 import heapq
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 
@@ -29,6 +29,75 @@ class PriorityQueue:
     def __len__(self) -> int:
         return len(self._queue)
 
+    def items(self) -> List[Any]:
+        """Return all items in the queue (for inspection/metrics)."""
+        return [item for _, _, item in self._queue]
+
+
+class SchedulerMetrics:
+    """Exposes queue depth, processing latency, and lease renewal metrics."""
+
+    def __init__(self):
+        self._processing_times: List[float] = []
+        self._backlog_peak = 0
+        self._lease_renewals = 0
+        self._lease_failures = 0
+
+    def record_processing_time(self, seconds: float) -> None:
+        self._processing_times.append(seconds)
+
+    def record_lease_renewal(self) -> None:
+        self._lease_renewals += 1
+
+    def record_lease_failure(self) -> None:
+        self._lease_failures += 1
+
+    def observe_backlog(self, depth: int) -> None:
+        if depth > self._backlog_peak:
+            self._backlog_peak = depth
+
+    @property
+    def avg_processing_time(self) -> float:
+        if not self._processing_times:
+            return 0.0
+        return sum(self._processing_times) / len(self._processing_times)
+
+    @property
+    def p99_processing_time(self) -> float:
+        if not self._processing_times:
+            return 0.0
+        sorted_times = sorted(self._processing_times)
+        idx = int(len(sorted_times) * 0.99)
+        return sorted_times[min(idx, len(sorted_times) - 1)]
+
+    @property
+    def backlog_peak(self) -> int:
+        return self._backlog_peak
+
+    @property
+    def lease_renewal_count(self) -> int:
+        return self._lease_renewals
+
+    @property
+    def lease_failure_count(self) -> int:
+        return self._lease_failures
+
+    @property
+    def health_score(self) -> float:
+        """Composite health score from 0.0 (unhealthy) to 1.0 (healthy)."""
+        score = 1.0
+        # Penalty for lease failures
+        if self._lease_failures > 0:
+            ratio = self._lease_failures / max(self._lease_renewals + self._lease_failures, 1)
+            score -= min(ratio * 0.5, 0.5)
+        # Penalty for high P99 processing time (threshold: 30s)
+        if self.p99_processing_time > 30:
+            score -= min((self.p99_processing_time - 30) / 120, 0.3)
+        # Penalty for high backlog
+        if self._backlog_peak > 100:
+            score -= min((self._backlog_peak - 100) / 900, 0.2)
+        return max(score, 0.0)
+
 
 class TaskScheduler:
     def __init__(self):
@@ -36,6 +105,20 @@ class TaskScheduler:
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
         self._max_retries = 3
+        self._start_times: Dict[str, float] = {}
+        self._metrics = SchedulerMetrics()
+
+    @property
+    def metrics(self) -> SchedulerMetrics:
+        return self._metrics
+
+    def queue_depth(self, queue: str = "default") -> int:
+        if queue in self._queues:
+            return len(self._queues[queue])
+        return 0
+
+    def total_backlog(self) -> int:
+        return sum(len(q) for q in self._queues.values()) + len(self._scheduled)
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
         task_id = str(uuid4())
@@ -46,12 +129,14 @@ class TaskScheduler:
         if queue not in self._queues:
             self._queues[queue] = PriorityQueue()
         self._queues[queue].push(task, priority)
+        self._metrics.observe_backlog(self.total_backlog())
         return task_id
 
     def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         self._scheduled[task_id] = time.time() + delay
+        self._metrics.observe_backlog(self.total_backlog())
         return task_id
 
     async def dequeue(self, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
@@ -66,21 +151,32 @@ class TaskScheduler:
             task = self._queues[queue].pop()
             if task:
                 self._in_flight[task["id"]] = task
+                self._start_times[task["id"]] = time.time()
+                self._metrics.record_lease_renewal()
                 return task
         return None
 
     def complete(self, task_id: str) -> bool:
-        return self._in_flight.pop(task_id, None) is not None
+        task = self._in_flight.pop(task_id, None)
+        if task:
+            start = self._start_times.pop(task_id, None)
+            if start:
+                self._metrics.record_processing_time(time.time() - start)
+            return True
+        return False
 
     def fail(self, task_id: str, queue: str = "default") -> bool:
         task = self._in_flight.pop(task_id, None)
         if task:
+            start = self._start_times.pop(task_id, None)
+            if start:
+                self._metrics.record_processing_time(time.time() - start)
+            self._metrics.record_lease_failure()
             task["retries"] += 1
             if task["retries"] < self._max_retries:
                 self.enqueue(task, queue, priority=task.get("priority", 0))
                 return True
         return False
-
 # 2019-04-25T08:37:12 update
 
 # 2019-06-04T16:40:00 update
