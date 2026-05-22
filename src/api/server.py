@@ -9,6 +9,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from .routes import router
 from .middleware import AuthMiddleware, RateLimitMiddleware, LoggingMiddleware
+from src.webhook.routes import router as webhook_router
 
 
 def create_app(config: Dict = None) -> FastAPI:
@@ -35,6 +36,7 @@ def create_app(config: Dict = None) -> FastAPI:
     app.add_middleware(LoggingMiddleware)
 
     app.include_router(router, prefix="/api/v2")
+    app.include_router(webhook_router, prefix="/api/v2")
 
     @app.get("/health")
     async def health():
