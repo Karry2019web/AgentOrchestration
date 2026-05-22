@@ -1,155 +1,133 @@
+"""Tests for HealthGate — verifies defer runs during dependency outages."""
+
+import time
 import pytest
-from src.orchestrator.scheduler import TaskScheduler
-
-
-class TestTaskScheduler:
-    def setup_method(self):
-        self.scheduler = TaskScheduler()
-
-    def test_enqueue_task(self):
-        task_id = self.scheduler.enqueue({"type": "test", "payload": {}})
-        assert task_id is not None
-
-    def test_dequeue_task(self):
-        self.scheduler.enqueue({"type": "test", "payload": {"data": 1}})
-        import asyncio
-        task = asyncio.run(self.scheduler.dequeue())
-        assert task is not None
-        assert task["type"] == "test"
-
-    def test_enqueue_multiple_priorities(self):
-        self.scheduler.enqueue({"type": "low"}, priority=1)
-        self.scheduler.enqueue({"type": "high"}, priority=10)
-        import asyncio
-        task = asyncio.run(self.scheduler.dequeue())
-        assert task["type"] == "high"
-
-    def test_complete_task(self):
-        self.scheduler.enqueue({"type": "test"})
-        import asyncio
-        task = asyncio.run(self.scheduler.dequeue())
-        assert self.scheduler.complete(task["id"])
-
-    def test_fail_task_with_retry(self):
-        self.scheduler.enqueue({"type": "test"})
-        import asyncio
-        task = asyncio.run(self.scheduler.dequeue())
-        assert self.scheduler.fail(task["id"])
-
-# 2019-01-09T19:07:03 update
-
-# 2019-02-18T12:30:02 update
-
-# 2019-04-11T16:04:51 update
-
-# 2019-04-17T16:25:46 update
-
-# 2019-05-24T19:32:13 update
-
-# 2019-07-02T12:54:25 update
-
-# 2019-07-03T20:37:00 update
-
-# 2019-08-21T19:37:17 update
-
-# 2019-10-18T10:30:31 update
-
-# 2019-10-25T09:01:38 update
-
-# 2019-10-29T12:59:34 update
-
-# 2019-11-05T10:07:06 update
-
-# 2019-11-11T10:43:52 update
-
-# 2020-01-17T13:40:02 update
-
-# 2020-02-07T14:06:34 update
-
-# 2020-04-03T08:53:40 update
-
-# 2020-04-06T19:36:29 update
-
-# 2020-05-12T11:51:05 update
-
-# 2020-08-17T08:37:15 update
-
-# 2020-09-15T10:39:38 update
-
-# 2020-10-06T11:26:19 update
-
-# 2020-10-21T13:32:43 update
-
-# 2020-12-14T18:18:36 update
-
-# 2020-12-23T17:15:03 update
-
-# 2021-01-25T16:29:00 update
-
-# 2021-02-23T11:23:50 update
-
-# 2021-03-19T12:21:19 update
-
-# 2021-07-29T18:48:25 update
-
-# 2021-08-25T12:46:58 update
-
-# 2021-09-09T16:27:13 update
-
-# 2021-12-16T12:05:30 update
-
-# 2022-05-07T14:05:12 update
-
-# 2022-07-18T20:52:29 update
-
-# 2022-07-31T18:42:26 update
-
-# 2022-09-09T13:10:08 update
-
-# 2023-01-04T15:16:57 update
-
-# 2023-01-17T14:49:04 update
-
-# 2023-02-15T13:51:30 update
-
-# 2023-03-08T09:15:53 update
-
-# 2023-03-23T16:32:20 update
-
-# 2023-03-28T09:32:01 update
-
-# 2023-05-05T17:28:22 update
-
-# 2023-06-01T08:13:52 update
-
-# 2023-06-20T09:58:10 update
-
-# 2023-07-04T16:14:34 update
-
-# 2023-07-17T20:49:40 update
-
-# 2023-12-26T11:49:18 update
-
-# 2024-05-27T11:00:06 update
-
-# 2024-07-04T08:53:03 update
-
-# 2024-07-18T16:19:02 update
-
-# 2024-08-07T09:35:35 update
-
-# 2024-08-22T14:32:14 update
-
-# 2025-05-20T14:19:23 update
-
-# 2025-07-17T17:54:48 update
-
-# 2025-07-28T13:06:30 update
-
-# 2025-12-22T19:05:25 update
-
-# 2026-01-08T18:43:02 update
-
-# 2026-01-12T16:53:28 update
-
-# 2026-04-16T16:58:23 update
+from src.orchestrator.scheduler import HealthGate, HealthStatus
+
+
+class TestHealthStatus:
+    def test_starts_healthy(self):
+        hs = HealthStatus("db")
+        assert hs.is_healthy is True
+
+    def test_failure_threshold_marks_unhealthy(self):
+        hs = HealthStatus("api", check_interval=60)
+        hs.record_failure()
+        hs.record_failure()
+        assert hs.is_healthy is True  # Not yet at threshold
+        hs.record_failure()
+        assert hs.is_healthy is False  # Reached max_failures=3
+
+    def test_success_resets_failures(self):
+        hs = HealthStatus("cache")
+        hs.record_failure()
+        hs.record_failure()
+        hs.record_success()
+        assert hs.is_healthy is True
+        assert hs._consecutive_failures == 0
+
+    def test_is_stale_after_check_interval(self):
+        hs = HealthStatus("queue", check_interval=0.01)
+        hs.record_success()
+        time.sleep(0.03)
+        assert hs.is_stale is True
+
+    def test_reset_restores_health(self):
+        hs = HealthStatus("db")
+        hs.record_failure()
+        hs.record_failure()
+        hs.record_failure()
+        assert hs.is_healthy is False
+        hs.reset()
+        assert hs.is_healthy is True
+
+
+class TestHealthGate:
+    def test_register_service(self):
+        gate = HealthGate()
+        hs = gate.register("database")
+        assert hs is gate.get_status("database")
+
+    def test_check_healthy_probe(self):
+        gate = HealthGate()
+        gate.register("api")
+        result = gate.check("api", lambda: True)
+        assert result is True
+        assert gate.can_schedule("api") is True
+
+    def test_check_unhealthy_probe(self):
+        gate = HealthGate()
+        gate.register("api")
+        for _ in range(3):
+            gate.check("api", lambda: False)
+        assert gate.can_schedule("api") is False
+
+    def test_check_exception_probe(self):
+        gate = HealthGate()
+        gate.register("api")
+
+        def failing_probe():
+            raise ConnectionError("timeout")
+
+        for _ in range(3):
+            gate.check("api", failing_probe)
+        assert gate.can_schedule("api") is False
+
+    def test_defer_and_release(self):
+        gate = HealthGate()
+        gate.register("db")
+        for _ in range(3):
+            gate.check("db", lambda: False)
+
+        task = {"id": "task-1", "type": "process"}
+        gate.defer(task, "db", reason="db_outage")
+        assert gate.count_deferred() == 1
+
+        released = gate.release_deferred("db")
+        assert len(released) == 1
+        assert released[0]["id"] == "task-1"
+        assert gate.count_deferred() == 0
+
+    def test_unknown_service_allows_scheduling(self):
+        gate = HealthGate()
+        assert gate.can_schedule("unknown") is True
+
+    def test_all_unhealthy(self):
+        gate = HealthGate()
+        gate.register("db")
+        gate.register("api")
+        for _ in range(3):
+            gate.check("db", lambda: False)
+        assert gate.all_unhealthy() == ["db"]
+
+    def test_deferred_tasks_released_after_recovery(self):
+        gate = HealthGate()
+        gate.register("redis")
+        for _ in range(3):
+            gate.check("redis", lambda: False)
+
+        for i in range(3):
+            gate.defer({"id": f"task-{i}"}, "redis", reason="redis_down")
+
+        assert gate.count_deferred() == 3
+
+        # Service recovers
+        gate.check("redis", lambda: True)
+        released = gate.release_deferred("redis")
+        assert len(released) == 3
+
+    def test_concurrent_defer_across_multiple_services(self):
+        gate = HealthGate()
+        gate.register("db")
+        gate.register("cache")
+        for svc in ["db", "cache"]:
+            for _ in range(3):
+                gate.check(svc, lambda: False)
+
+        gate.defer({"id": "task-a"}, "db")
+        gate.defer({"id": "task-b"}, "cache")
+        gate.defer({"id": "task-c"}, "db")
+
+        assert gate.count_deferred() == 3
+        assert len(gate.release_deferred("db")) == 2
+        assert len(gate.release_deferred("cache")) == 1

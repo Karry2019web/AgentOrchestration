@@ -3,8 +3,125 @@
 import asyncio
 import heapq
 import time
-from typing import Any, Dict, Optional
+import logging
+from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
+
+
+class HealthStatus:
+    """Tracks external service health for dependency-aware scheduling."""
+
+    def __init__(self, name: str, check_interval: float = 30.0):
+        self.name = name
+        self.check_interval = check_interval
+        self._healthy = True
+        self._last_checked = 0.0
+        self._consecutive_failures = 0
+        self._max_failures = 3
+
+    @property
+    def is_healthy(self) -> bool:
+        return self._healthy
+
+    @property
+    def is_stale(self) -> bool:
+        return time.time() - self._last_checked > self.check_interval * 2
+
+    def record_success(self) -> None:
+        self._healthy = True
+        self._consecutive_failures = 0
+        self._last_checked = time.time()
+
+    def record_failure(self) -> None:
+        self._consecutive_failures += 1
+        self._last_checked = time.time()
+        if self._consecutive_failures >= self._max_failures:
+            self._healthy = False
+            logger.warning(f"Health gate [{self.name}]: marked unhealthy after {self._consecutive_failures} consecutive failures")
+
+    def reset(self) -> None:
+        self._healthy = True
+        self._consecutive_failures = 0
+        self._last_checked = time.time()
+
+
+class HealthGate:
+    """Central health gate for external service dependency checks.
+
+    Defer runs during dependency outages — runs are queued until the dependency
+    recovers, preventing duplicated, delayed, or out-of-policy dispatch.
+    """
+
+    def __init__(self):
+        self._services: Dict[str, HealthStatus] = {}
+        self._defers: Dict[str, List[Dict]] = {}
+
+    def register(self, name: str, check_interval: float = 30.0) -> HealthStatus:
+        status = HealthStatus(name, check_interval)
+        self._services[name] = status
+        self._defers[name] = []
+        return status
+
+    def get_status(self, name: str) -> Optional[HealthStatus]:
+        return self._services.get(name)
+
+    def check(self, name: str, probe: Callable[[], bool]) -> bool:
+        """Execute a health probe and record the result.
+        
+        Returns True if the service is healthy after the probe, False otherwise.
+        """
+        status = self._services.get(name)
+        if status is None:
+            return True  # Unknown services are assumed healthy
+        try:
+            result = probe()
+            if result:
+                status.record_success()
+            else:
+                status.record_failure()
+        except Exception as e:
+            logger.error(f"Health gate probe [{name}] failed with exception: {e}")
+            status.record_failure()
+            return False
+        return status.is_healthy
+
+    def can_schedule(self, name: str) -> bool:
+        """Check if scheduling is allowed for the given dependency.
+        
+        Atomic state precondition applied before committing scheduling,
+        routing, queue, or workflow state.
+        """
+        status = self._services.get(name)
+        if status is None:
+            return True
+        return status.is_healthy and not status.is_stale
+
+    def defer(self, task: Dict, name: str, reason: str = "dependency_unhealthy") -> str:
+        """Defer a run during dependency outage."""
+        task_id = task.get("id", str(uuid4()))
+        self._defers.setdefault(name, []).append({
+            "task_id": task_id,
+            "task": task,
+            "deferred_at": time.time(),
+            "reason": reason,
+        })
+        logger.info(f"Deferred task {task_id} due to {name} outage: {reason}")
+        return task_id
+
+    def release_deferred(self, name: str) -> List[Dict]:
+        """Release all deferred tasks for a now-healthy dependency."""
+        tasks = self._defers.pop(name, [])
+        if tasks:
+            logger.info(f"Released {len(tasks)} deferred tasks for {name}")
+        return [t["task"] for t in tasks]
+
+    def all_unhealthy(self) -> List[str]:
+        return [name for name, s in self._services.items() if not s.is_healthy]
+
+    def count_deferred(self) -> int:
+        return sum(len(tasks) for tasks in self._defers.values())
 
 
 class PriorityQueue:
@@ -36,6 +153,7 @@ class TaskScheduler:
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
         self._max_retries = 3
+        self.health_gate = HealthGate()
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
         task_id = str(uuid4())
@@ -214,3 +332,4 @@ class TaskScheduler:
 # 2026-03-18T14:43:07 update
 
 # 2026-04-13T11:43:19 update
+
