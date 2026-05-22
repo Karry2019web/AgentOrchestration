@@ -39,7 +39,25 @@ def cli():
     elif args.command == "deploy":
         print(f"Deploying agent from manifest: {args.manifest}")
     elif args.command == "status":
+        import signal
+        import time
+        
+        watch_active = ["running"]
+        
+        def _handle_sigint(sig, frame):
+            watch_active[0] = "stopped"
+            print("\nStatus watcher shutting down...")
+        
+        signal.signal(signal.SIGINT, _handle_sigint)
         print("Checking agent status...")
+        
+        if args.watch:
+            while watch_active[0] == "running":
+                try:
+                    time.sleep(1)
+                except KeyboardInterrupt:
+                    watch_active[0] = "stopped"
+            print("Status watcher stopped.")
     elif args.command == "logs":
         print(f"Fetching logs for agent: {args.agent_id}")
     else:
