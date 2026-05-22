@@ -166,3 +166,7 @@ docker-down:
 # 2025-12-22T19:04:57 update
 
 # 2026-03-13T13:35:41 update
+
+.PHONY: verify-provenance
+verify-provenance:
+	gh attestation verify dist/*.tar.gz --repo orchestration-agent/AgentOrchestration

@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  id-token: write
+  contents: write
+  attestations: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-digest: ${{ steps.hash.outputs.digest }}
+      artifact-name: ${{ steps.build.outputs.artifact-name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run tests
+        run: uv run pytest --cov=src tests/
+
+      - name: Build packages
+        id: build
+        run: |
+          uv build
+          echo "artifact-name=$(ls dist/ | head -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate artifact hash
+        id: hash
+        run: |
+          DIGEST=$(sha256sum dist/*.tar.gz dist/*.whl | base64 -w0)
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
+
+  provenance:
+    needs: [build]
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+      attestations: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: "${{ needs.build.outputs.artifact-digest }}"
+      upload-assets: true
+      provenance-name: "provenance.intoto.jsonl"
+
+  release:
+    needs: [build, provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: _artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            _artifacts/release-artifacts/*
+            _artifacts/provenance/*
+          generate_release_notes: true
+          make_latest: true
