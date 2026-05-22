@@ -1,10 +1,11 @@
-"""Task Scheduler — Priority-based task queuing and dispatch."""
+"""Task Scheduler — Priority-based task queuing and dispatch with workspace scoping."""
 
-import asyncio
 import heapq
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
+
+from src.orchestrator.task_repository import TaskRepository
 
 
 class PriorityQueue:
@@ -31,186 +32,134 @@ class PriorityQueue:
 
 
 class TaskScheduler:
-    def __init__(self):
+    """Task scheduler with workspace-scoped state enforcement.
+
+    All task operations require a workspace_id to ensure tasks are
+    scoped to their workspace. The scheduler delegates all persistent
+    state to a TaskRepository instance.
+    """
+
+    def __init__(self, repository: Optional[TaskRepository] = None):
+        self._repo = repository or TaskRepository()
+        # Per-workspace priority queues (ephemeral ordering, not long-term state)
         self._queues: Dict[str, PriorityQueue] = {}
-        self._scheduled: Dict[str, float] = {}
-        self._in_flight: Dict[str, Dict] = {}
         self._max_retries = 3
 
-    def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
+    def enqueue(self, task: Dict, workspace_id: str, queue: str = "default", priority: int = 0) -> str:
+        """Enqueue a task under a workspace scope.
+
+        Args:
+            task: Task payload dict.
+            workspace_id: Scoping workspace identifier (required).
+            queue: Queue name within the workspace.
+            priority: Higher = dequeued sooner.
+
+        Returns:
+            The generated task ID.
+        """
         task_id = str(uuid4())
         task["id"] = task_id
+        task["workspace_id"] = workspace_id
         task["enqueued_at"] = time.time()
         task["retries"] = 0
 
-        if queue not in self._queues:
-            self._queues[queue] = PriorityQueue()
-        self._queues[queue].push(task, priority)
+        # Persist in workspace-scoped repository
+        self._repo.put_task(workspace_id, task_id, task)
+
+        # Add to in-memory priority queue for this workspace
+        queue_key = f"{workspace_id}:{queue}"
+        if queue_key not in self._queues:
+            self._queues[queue_key] = PriorityQueue()
+        self._queues[queue_key].push(task_id, priority)
+
         return task_id
 
-    def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
+    def schedule(self, task: Dict, delay: float, workspace_id: str, queue: str = "default", priority: int = 0) -> str:
+        """Schedule a future task under workspace scope.
+
+        Args:
+            task: Task payload dict.
+            delay: Seconds from now to schedule the task for.
+            workspace_id: Scoping workspace identifier (required).
+            queue: Queue name within the workspace.
+            priority: Higher = dequeued sooner.
+
+        Returns:
+            The generated task ID.
+        """
         task_id = str(uuid4())
         task["id"] = task_id
-        self._scheduled[task_id] = time.time() + delay
+        task["workspace_id"] = workspace_id
+        task["enqueued_at"] = time.time()
+        task["retries"] = 0
+
+        # Persist in workspace-scoped repository
+        self._repo.put_task(workspace_id, task_id, task)
+        self._repo.schedule_task(workspace_id, task_id, task, time.time() + delay)
+
         return task_id
 
-    async def dequeue(self, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
-        now = time.time()
-        expired = [tid for tid, t in self._scheduled.items() if t <= now]
-        for tid in expired:
-            task = self._scheduled.pop(tid)
-            if task:
-                self.enqueue(task, queue)
+    async def dequeue(self, workspace_id: str, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
+        """Dequeue the next task from a workspace queue.
 
-        if queue in self._queues and len(self._queues[queue]) > 0:
-            task = self._queues[queue].pop()
-            if task:
-                self._in_flight[task["id"]] = task
-                return task
+        Args:
+            workspace_id: Scoping workspace identifier (required).
+            queue: Queue name within the workspace.
+            timeout: Unused in this implementation; kept for API compatibility.
+
+        Returns:
+            The next task, or None if the queue is empty.
+        """
+        # Move expired scheduled tasks to the active queue
+        now = time.time()
+        expired = self._repo.list_expired_scheduled(workspace_id, now)
+        for tid, task in expired:
+            queue_key = f"{workspace_id}:{queue}"
+            if queue_key not in self._queues:
+                self._queues[queue_key] = PriorityQueue()
+            self._queues[queue_key].push(tid, task.get("priority", 0))
+
+        # Dequeue from priority queue
+        queue_key = f"{workspace_id}:{queue}"
+        if queue_key in self._queues and len(self._queues[queue_key]) > 0:
+            task_id = self._queues[queue_key].pop()
+            if task_id:
+                task = self._repo.get_task(workspace_id, task_id)
+                if task:
+                    self._repo.mark_in_flight(workspace_id, task_id, task)
+                    return task
         return None
 
-    def complete(self, task_id: str) -> bool:
-        return self._in_flight.pop(task_id, None) is not None
+    def get_task(self, workspace_id: str, task_id: str) -> Optional[Dict]:
+        """Retrieve a workspace-scoped task by ID."""
+        return self._repo.get_task(workspace_id, task_id)
 
-    def fail(self, task_id: str, queue: str = "default") -> bool:
-        task = self._in_flight.pop(task_id, None)
-        if task:
-            task["retries"] += 1
-            if task["retries"] < self._max_retries:
-                self.enqueue(task, queue, priority=task.get("priority", 0))
-                return True
+    def complete(self, task_id: str, workspace_id: str) -> bool:
+        """Mark a task as completed under its workspace scope."""
+        task = self._repo.complete_in_flight(workspace_id, task_id)
+        if task is None:
+            return False
+        self._repo.delete_task(workspace_id, task_id)
+        return True
+
+    def fail(self, task_id: str, workspace_id: str, queue: str = "default") -> bool:
+        """Retry a failed task under its workspace scope.
+
+        Returns True if the task was retried, False if max retries exceeded.
+        """
+        task = self._repo.complete_in_flight(workspace_id, task_id)
+        if task is None:
+            return False
+        task["retries"] += 1
+        if task["retries"] < self._max_retries:
+            self._repo.put_task(workspace_id, task_id, task)
+            queue_key = f"{workspace_id}:{queue}"
+            if queue_key not in self._queues:
+                self._queues[queue_key] = PriorityQueue()
+            self._queues[queue_key].push(task_id, task.get("priority", 0))
+            return True
         return False
 
-# 2019-04-25T08:37:12 update
-
-# 2019-06-04T16:40:00 update
-
-# 2019-07-11T12:01:28 update
-
-# 2019-08-02T12:20:21 update
-
-# 2019-08-23T10:38:50 update
-
-# 2019-10-31T13:55:52 update
-
-# 2019-11-04T20:12:32 update
-
-# 2019-12-13T12:22:36 update
-
-# 2020-02-01T10:32:37 update
-
-# 2020-02-26T09:44:38 update
-
-# 2020-03-09T19:00:55 update
-
-# 2020-05-01T18:40:34 update
-
-# 2020-05-12T15:10:31 update
-
-# 2020-06-30T13:24:19 update
-
-# 2020-09-22T16:00:45 update
-
-# 2020-10-20T10:52:48 update
-
-# 2020-10-21T12:18:08 update
-
-# 2020-11-06T12:35:01 update
-
-# 2020-12-09T08:09:33 update
-
-# 2021-01-07T08:20:36 update
-
-# 2021-10-02T15:23:16 update
-
-# 2021-10-06T16:14:57 update
-
-# 2021-10-06T09:27:41 update
-
-# 2021-11-19T08:37:40 update
-
-# 2022-03-01T16:39:54 update
-
-# 2022-05-26T13:43:07 update
-
-# 2022-06-02T10:50:58 update
-
-# 2022-06-14T10:46:48 update
-
-# 2022-07-31T16:44:34 update
-
-# 2022-08-30T18:20:12 update
-
-# 2022-11-04T14:47:03 update
-
-# 2022-12-06T10:36:49 update
-
-# 2022-12-22T13:21:12 update
-
-# 2022-12-26T12:24:50 update
-
-# 2023-03-09T08:09:55 update
-
-# 2023-05-01T10:07:37 update
-
-# 2023-06-08T14:32:15 update
-
-# 2023-07-14T17:24:18 update
-
-# 2023-12-14T08:38:31 update
-
-# 2024-02-20T13:43:58 update
-
-# 2024-03-24T08:52:42 update
-
-# 2024-03-28T15:27:17 update
-
-# 2024-03-29T18:10:33 update
-
-# 2024-04-15T20:18:31 update
-
-# 2024-05-27T13:11:52 update
-
-# 2024-05-27T16:42:56 update
-
-# 2024-06-20T13:03:45 update
-
-# 2024-06-28T12:32:58 update
-
-# 2024-07-10T14:10:16 update
-
-# 2024-07-26T14:18:59 update
-
-# 2024-08-12T08:21:05 update
-
-# 2024-08-21T16:58:40 update
-
-# 2024-09-27T19:54:30 update
-
-# 2024-10-21T13:47:42 update
-
-# 2024-11-11T09:19:27 update
-
-# 2024-12-24T08:23:41 update
-
-# 2025-02-14T10:35:15 update
-
-# 2025-03-31T18:09:40 update
-
-# 2025-06-21T17:32:49 update
-
-# 2025-07-21T16:52:28 update
-
-# 2025-08-20T19:45:16 update
-
-# 2025-11-04T18:54:24 update
-
-# 2025-12-09T20:17:36 update
-
-# 2026-01-12T15:42:32 update
-
-# 2026-01-23T14:41:20 update
-
-# 2026-03-18T14:43:07 update
-
-# 2026-04-13T11:43:19 update
+    def get_repository(self) -> TaskRepository:
+        """Expose the underlying repository for audit/inspection."""
+        return self._repo
