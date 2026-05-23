@@ -7,16 +7,21 @@ from typing import Any, Callable, Dict, List, Optional
 
 from src.agent import AgentRegistry, AgentStatus
 from src.orchestrator.scheduler import TaskScheduler
+from src.storage.lease_manager import JobLeaseManager
+from src.storage.artifact_uploader import ArtifactUploader
+from src.common.metrics import metrics
 
 logger = logging.getLogger(__name__)
 
 
 class OrchestrationEngine:
-    def __init__(self, max_workers: int = 10, agent_timeout: int = 300):
+    def __init__(self, max_workers: int = 10, agent_timeout: int = 300, lease_ttl: float = 60.0):
         self.registry = AgentRegistry()
         self.scheduler = TaskScheduler()
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.agent_timeout = agent_timeout
+        self.lease_manager = JobLeaseManager(default_ttl=lease_ttl)
+        self.artifact_uploader = ArtifactUploader(self.lease_manager)
         self._running = False
         self._hooks: Dict[str, List[Callable]] = {
             "pre_execute": [],
@@ -47,6 +52,11 @@ class OrchestrationEngine:
         agent_id = task["target_agent"]
         logger.info(f"Executing task {task_id} on agent {agent_id}")
 
+        # Acquire lease for this task execution to prevent duplicates
+        if not self.lease_manager.acquire(task_id):
+            logger.warning(f"Could not acquire lease for task {task_id}, skipping")
+            return
+
         for hook in self._hooks["pre_execute"]:
             await hook(task)
 
@@ -54,6 +64,7 @@ class OrchestrationEngine:
             agent = self.registry.get(agent_id)
             if not agent:
                 raise ValueError(f"Agent {agent_id} not found")
+                self.lease_manager.release(task_id)
 
             self.registry.update_status(agent_id, AgentStatus.RUNNING)
             result = await asyncio.wait_for(
@@ -62,15 +73,30 @@ class OrchestrationEngine:
             )
             self.registry.update_status(agent_id, AgentStatus.PAUSED)
 
+            # Renew lease for artifact upload phase
+            if self.lease_manager.is_active(task_id):
+                self.lease_manager.mark_uploading(task_id)
+
             for hook in self._hooks["post_execute"]:
                 await hook(task, result)
 
+            self.lease_manager.complete(task_id)
+            metrics.increment("task.completed")
             logger.info(f"Task {task_id} completed successfully")
+
+        except asyncio.TimeoutError:
+            logger.error(f"Task {task_id} timed out after {self.agent_timeout}s")
+            self.lease_manager.release(task_id)
+            for hook in self._hooks["on_error"]:
+                await hook(task, "timeout")
+            metrics.increment("task.timeout")
 
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}")
+            self.lease_manager.release(task_id)
             for hook in self._hooks["on_error"]:
                 await hook(task, e)
+            metrics.increment("task.error")
 
     async def _run_agent_task(self, agent: Dict, task: Dict) -> Any:
         loop = asyncio.get_event_loop()
