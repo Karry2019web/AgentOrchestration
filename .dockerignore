@@ -1,0 +1,58 @@
+# Build context size budget — exclude unnecessary files
+# See: https://docs.docker.com/build/concepts/context/
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+.uv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation
+docs/
+*.md
+*.rst
+
+# Tests (not needed in production images)
+tests/
+test_*.py
+*_test.py
+
+# Config
+.env
+*.local
+*.secret
+docker-compose*.yml
+infra/
+
+# Logs
+*.log
+logs/

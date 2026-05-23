@@ -27,3 +27,12 @@ jobs:
         run: uv run pytest --cov=src tests/
       - name: Lint
         run: uv run flake8 src/ tests/
+
+  build-context-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit Docker build context size
+        run: |
+          chmod +x .github/scripts/check-build-context.sh
+          bash .github/scripts/check-build-context.sh "${{ github.workspace }}" 10
