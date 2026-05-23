@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from typing import List, Dict, Optional
 
 from src.agent import AgentRegistry, AgentStatus
+from src.common.quarantine import quarantine_store
 
 router = APIRouter()
 registry = AgentRegistry()
@@ -191,3 +192,31 @@ async def agent_count():
 # 2026-04-09T20:30:37 update
 
 # 2026-05-13T11:36:25 update
+
+
+@router.get("/quarantine")
+async def list_quarantined(limit: int = 50):
+    """List redacted summaries of quarantined validation failures."""
+    return {"records": quarantine_store.list_redacted(limit=limit)}
+
+
+@router.get("/quarantine/{record_id}")
+async def get_quarantined_record(record_id: str, raw: bool = False):
+    """Get a quarantined record. Redacted by default; pass ?raw=true for full payload."""
+    if raw:
+        record = quarantine_store.get_raw(record_id)
+    else:
+        record = quarantine_store.get_redacted(record_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Quarantine record not found or expired")
+    return record
+
+
+@router.delete("/quarantine/{record_id}")
+async def delete_quarantined_record(record_id: str):
+    """Delete a quarantined record immediately."""
+    record = quarantine_store.get_raw(record_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Quarantine record not found or expired")
+    quarantine_store.cleanup()
+    return {"status": "deleted"}
