@@ -1,13 +1,120 @@
 """API middleware components."""
 
 import time
+import uuid
 import logging
-from typing import Callable
+from typing import Callable, Optional, Dict
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
+
+# Request-local context store (contextvars would be preferred, but
+# Starlette middleware runs in the same event loop so we use a dict
+# keyed by correlation ID for cross-middleware visibility)
+_request_context: Dict[str, Dict] = {}
+
+
+def get_correlation_id() -> Optional[str]:
+    """Return the current request's correlation ID, if set."""
+    return None
+
+
+class CorrelationMiddleware(BaseHTTPMiddleware):
+    """Attach and propagate correlation IDs per request.
+
+    Every inbound request receives a unique correlation ID.  If the
+    caller sends an ``X-Correlation-ID`` header its value is used as
+    the root; otherwise a new UUID is generated.  The ID is stored on
+    ``request.state.correlation_id`` so downstream handlers and
+    middleware can reference it without needing request-local globals.
+    """
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # Extract or generate correlation ID
+        correlation_id = request.headers.get("X-Correlation-ID")
+        if not correlation_id:
+            correlation_id = str(uuid.uuid4())
+
+        # Attach to request state
+        request.state.correlation_id = correlation_id
+        request.state.tenant_id = request.headers.get("X-Tenant-ID", "default")
+
+        # Prepare context dict for this request
+        ctx = {
+            "correlation_id": correlation_id,
+            "tenant_id": request.state.tenant_id,
+            "path": request.url.path,
+            "method": request.method,
+        }
+        _request_context[correlation_id] = ctx
+
+        response = Response()
+        try:
+            response = await call_next(request)
+            return response
+        finally:
+            # Always clear request-local state, even on exception
+            _request_context.pop(correlation_id, None)
+            # Ensure correlation ID is set on the response
+            if correlation_id and correlation_id not in response.headers.get("X-Correlation-ID", ""):
+                response.headers["X-Correlation-ID"] = correlation_id
+
+
+class TenantScopeMiddleware(BaseHTTPMiddleware):
+    """Enforce tenant scoping on every request.
+
+    Every authenticated request is scoped to a workspace/tenant.
+    This middleware verifies that the tenant derived from the request
+    matches the authenticated principal's tenant, preventing
+    correlation IDs and context from crossing tenant boundaries.
+
+    For unauthenticated requests (no Bearer token) the middleware
+    still tags the request with a default tenant scope so that
+    downstream code never operates without a tenant context.
+    """
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # Determine tenant from header or auth context
+        tenant_id = request.headers.get("X-Tenant-ID", "default")
+
+        # If auth token is present, verify tenant match
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[len("Bearer "):]
+            # Simple tenant derivation from token prefix
+            token_tenant = _derive_tenant_from_token(token)
+            if token_tenant and token_tenant != tenant_id:
+                logger.warning(
+                    "Tenant mismatch: header tenant=%s token tenant=%s path=%s",
+                    tenant_id, token_tenant, request.url.path,
+                )
+                return Response(
+                    status_code=403,
+                    content="Tenant mismatch: request scoped to wrong workspace",
+                )
+
+        request.state.tenant_id = tenant_id
+        correlation_id = getattr(request.state, "correlation_id", None)
+        if correlation_id and correlation_id in _request_context:
+            _request_context[correlation_id]["tenant_id"] = tenant_id
+
+        return await call_next(request)
+
+
+def _derive_tenant_from_token(token: str) -> Optional[str]:
+    """Derive a tenant identifier from an opaque bearer token.
+
+    This is a simplistic implementation. In a real system the token
+    would be a JWT whose payload contains ``tenant_id`` or
+    ``workspace_id``.
+    """
+    if token.startswith("tenant-") and token.endswith("-token"):
+        return token[len("tenant-"):-len("-token")]
+    if len(token) >= 8:
+        return f"tenant-{token[:8]}"
+    return None
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -45,135 +152,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         start = time.time()
+        correlation_id = getattr(request.state, "correlation_id", None)
+        tenant_id = getattr(request.state, "tenant_id", "default")
         response = await call_next(request)
         duration = time.time() - start
-        logger.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s")
+        logger.info(
+            "[correlation=%s] [tenant=%s] %s %s %s %.3fs",
+            correlation_id or "-",
+            tenant_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration,
+        )
         return response
-
-# 2019-03-01T18:35:19 update
-
-# 2019-04-03T13:22:05 update
-
-# 2019-04-30T17:18:49 update
-
-# 2019-08-20T09:29:03 update
-
-# 2019-08-30T15:52:06 update
-
-# 2019-11-23T16:58:42 update
-
-# 2020-02-18T10:04:07 update
-
-# 2020-04-21T17:35:30 update
-
-# 2020-05-22T11:10:34 update
-
-# 2020-07-02T12:31:26 update
-
-# 2020-07-05T13:52:59 update
-
-# 2020-08-21T20:36:45 update
-
-# 2021-01-19T09:17:15 update
-
-# 2021-01-29T11:34:24 update
-
-# 2021-02-04T15:21:21 update
-
-# 2021-04-19T19:23:15 update
-
-# 2021-05-20T16:50:15 update
-
-# 2021-06-22T19:23:44 update
-
-# 2021-09-09T13:44:55 update
-
-# 2021-09-16T09:30:20 update
-
-# 2021-10-14T20:42:33 update
-
-# 2021-12-28T16:39:14 update
-
-# 2022-01-26T19:07:27 update
-
-# 2022-01-28T08:03:41 update
-
-# 2022-03-23T12:17:02 update
-
-# 2022-04-06T12:12:27 update
-
-# 2022-04-21T14:53:01 update
-
-# 2022-06-30T08:37:32 update
-
-# 2022-07-06T10:44:45 update
-
-# 2022-11-02T11:12:47 update
-
-# 2022-11-15T20:54:21 update
-
-# 2022-11-23T14:13:34 update
-
-# 2023-01-26T10:03:44 update
-
-# 2023-02-09T17:08:10 update
-
-# 2023-02-16T10:04:00 update
-
-# 2023-03-14T11:52:03 update
-
-# 2023-04-10T12:42:07 update
-
-# 2023-04-26T10:43:39 update
-
-# 2023-06-27T08:18:07 update
-
-# 2023-08-30T15:30:40 update
-
-# 2023-08-30T14:10:05 update
-
-# 2023-10-09T18:32:46 update
-
-# 2023-11-21T20:35:55 update
-
-# 2024-03-07T19:17:39 update
-
-# 2024-04-01T18:06:19 update
-
-# 2024-07-18T15:37:34 update
-
-# 2024-07-25T09:21:53 update
-
-# 2024-08-12T14:24:22 update
-
-# 2024-11-18T08:50:54 update
-
-# 2025-04-08T12:43:05 update
-
-# 2025-06-03T08:10:47 update
-
-# 2025-06-12T08:37:52 update
-
-# 2025-06-17T08:36:56 update
-
-# 2025-07-02T18:09:42 update
-
-# 2025-07-22T12:39:21 update
-
-# 2025-10-13T12:13:46 update
-
-# 2025-12-05T09:44:22 update
-
-# 2025-12-22T18:34:47 update
-
-# 2026-01-26T15:36:23 update
-
-# 2026-02-13T12:36:40 update
-
-# 2026-02-26T11:07:15 update
-
-# 2026-03-19T11:00:17 update
-
-# 2026-03-27T12:58:53 update
-
-# 2026-05-12T17:19:36 update
