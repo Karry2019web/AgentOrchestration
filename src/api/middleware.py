@@ -1,8 +1,10 @@
 """API middleware components."""
 
-import time
+import asyncio
 import logging
+import time
 from typing import Callable
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -29,15 +31,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         client_ip = request.client.host if request.client else "unknown"
         now = time.time()
-
         if client_ip not in self._requests:
             self._requests[client_ip] = []
-
         self._requests[client_ip] = [t for t in self._requests[client_ip] if now - t < self.window]
-
         if len(self._requests[client_ip]) >= self.max_requests:
             return Response(status_code=429, content="Too many requests")
-
         self._requests[client_ip].append(now)
         return await call_next(request)
 
@@ -49,6 +47,61 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         duration = time.time() - start
         logger.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s")
         return response
+
+
+class CancellationAwareMiddleware(BaseHTTPMiddleware):
+    """Propagates request cancellation to downstream agent tasks.
+
+    Creates a per-request CancellationScope and wires it into
+    request.state so that route handlers and downstream agent calls
+    can register cancellable work. On client disconnect, CancelledError,
+    or exception, all registered tasks are cancelled and the request
+    terminates with a 499 status code.
+    """
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        from src.common.cancellation import RequestCancellationContext
+
+        ctx = RequestCancellationContext()
+        request.state.cancel_ctx = ctx
+
+        try:
+            if await request.is_disconnected():
+                logger.warning(
+                    "Request %s %s rejected — client disconnected before dispatch",
+                    request.method, request.url.path,
+                )
+                return Response(status_code=499, content="Client disconnected before dispatch")
+
+            response = await call_next(request)
+
+            if ctx.cancelled:
+                response = Response(
+                    status_code=499,
+                    content="Request cancelled, downstream work terminated",
+                    headers={"X-Agent-Cancellation": "propagated"},
+                )
+            else:
+                response.headers["X-Agent-Cancellation"] = "none"
+                response.headers["X-Agent-Downstream-Tasks"] = str(ctx.active_task_count)
+
+            return response
+
+        except asyncio.CancelledError:
+            ctx.cancel()
+            logger.warning(
+                "Request %s %s cancelled — terminating %d downstream tasks",
+                request.method, request.url.path, ctx.active_task_count,
+            )
+            return Response(
+                status_code=499,
+                content="Request cancelled, downstream work terminated",
+                headers={"X-Agent-Cancellation": "propagated"},
+            )
+
+        except Exception:
+            ctx.cancel()
+            raise
 
 # 2019-03-01T18:35:19 update
 
