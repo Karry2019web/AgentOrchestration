@@ -136,3 +136,52 @@ class TestMetricsCollector:
 # 2026-03-24T19:28:19 update
 
 # 2026-04-10T18:10:10 update
+
+class TestSnapshotLockReduction:
+    """Verify that snapshot copies minimal state under lock and formats outside."""
+
+    def setup_method(self):
+        self.metrics = MetricsCollector()
+
+    def test_snapshot_copies_histogram_data(self):
+        """Snapshot should return correct aggregate data."""
+        for i in range(10):
+            self.metrics.observe("response.time", float(i))
+        snapshot = self.metrics.snapshot()
+        hist = snapshot["histograms"]["response.time"]
+        assert hist["count"] == 10
+        assert hist["sum"] == 45.0
+        assert hist["avg"] == 4.5
+
+    def test_snapshot_does_not_lock_forever(self):
+        """Snapshot should complete quickly even with many histograms."""
+        import time
+        for i in range(100):
+            self.metrics.observe(f"metric.{i}", float(i))
+        start = time.time()
+        snapshot = self.metrics.snapshot()
+        duration = time.time() - start
+        # Should be nearly instant since formatting is outside the lock
+        assert duration < 1.0
+        assert len(snapshot["histograms"]) == 100
+
+    def test_concurrent_observe_during_snapshot(self, monkeypatch):
+        """Observation should not be blocked during snapshot formatting."""
+        import threading, time
+        results = []
+
+        def observer():
+            for _ in range(100):
+                self.metrics.observe("concurrent", 1.0)
+                time.sleep(0.001)
+            results.append("done")
+
+        t = threading.Thread(target=observer)
+        t.start()
+        # Snapshot while observer is running
+        for _ in range(5):
+            snap = self.metrics.snapshot()
+            assert "concurrent" in snap["histograms"]
+        t.join()
+        snap = self.metrics.snapshot()
+        assert snap["histograms"]["concurrent"]["count"] == 100
