@@ -7,6 +7,11 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 
+from src.agent.schema_cache import SchemaCache, ContractVersionError, validate_contract_change
+
+
+
+
 class AgentStatus(Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -21,6 +26,8 @@ class AgentRegistry:
         self.storage_backend = storage_backend
         self._agents: Dict[str, Dict[str, Any]] = {}
         self._index: Dict[str, List[str]] = {}
+        self._schema_cache = SchemaCache()
+        self._capability_contracts: Dict[str, Dict[str, Any]] = {}
 
     def register(self, name: str, agent_type: str, config: Optional[Dict] = None) -> str:
         agent_id = str(uuid.uuid4())
@@ -36,6 +43,21 @@ class AgentRegistry:
             "version": "1.0.0",
             "metrics": {"tasks_completed": 0, "errors": 0, "uptime": 0},
         }
+        # Associate a default capability contract with the new agent
+        contract = {
+            "name": agent_type,
+            "version": "1.0.0",
+            "required": [],
+        }
+        self._capability_contracts[agent_id] = contract
+
+        # Register the initial schema in the cache
+        self._schema_cache.set(
+            agent_id,
+            {"type": agent_type, "config": config or {}, "contract": contract},
+            contract,
+        )
+
         group = agent_type.split(".")[0]
         if group not in self._index:
             self._index[group] = []
@@ -44,6 +66,52 @@ class AgentRegistry:
 
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
         return self._agents.get(agent_id)
+
+    def get_schema(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """Return the cached schema for *agent_id*, or ``None`` if stale/missing.
+
+        If the agent's capability contract has changed since the schema was
+        cached the entry is evicted automatically and ``None`` is returned
+        so the caller re-derives the schema.
+        """
+        contract = self._capability_contracts.get(agent_id)
+        if contract is None:
+            return None
+        cached = self._schema_cache.get(agent_id, contract)
+        if cached is None:
+            return None
+        return cached.schema
+
+    def update_capability_contract(
+        self, agent_id: str, new_contract: Dict[str, Any]
+    ) -> bool:
+        """Update the capability contract for the agent, invalidating cached schemas.
+
+        Validates the contract change first — identity changes, version
+        downgrades, and required-field removals are rejected.
+        Returns ``True`` on success, ``False`` if the agent does not exist.
+        """
+        if agent_id not in self._agents:
+            return False
+        # Validate against prior contract
+        old_contract = self._capability_contracts.get(agent_id)
+        try:
+            validate_contract_change(old_contract, new_contract)
+        except ContractVersionError:
+            raise
+        # Invalidate any schema derived from the old contract
+        if old_contract:
+            self._schema_cache.invalidate_contract(old_contract)
+        self._capability_contracts[agent_id] = new_contract
+        # Re-cache with the new contract
+        agent = self._agents[agent_id]
+        self._schema_cache.set(
+            agent_id,
+            {"type": agent["type"], "config": agent.get("config", {}), "contract": new_contract},
+            new_contract,
+        )
+        self._agents[agent_id]["updated_at"] = __import__("time").time()
+        return True
 
     def list(self, status: Optional[AgentStatus] = None, group: Optional[str] = None) -> List[Dict[str, Any]]:
         agents = self._agents.values()
