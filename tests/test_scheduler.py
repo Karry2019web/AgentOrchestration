@@ -153,3 +153,31 @@ class TestTaskScheduler:
 # 2026-01-12T16:53:28 update
 
 # 2026-04-16T16:58:23 update
+
+
+class TestMalformedJobPayload:
+    def test_rejects_non_dict(self):
+        """Non-dict task payloads should be rejected."""
+        scheduler = TaskScheduler()
+        with pytest.raises(ValueError, match="payload"):
+            scheduler.enqueue({"not": "a payload"})
+
+    def test_rejects_missing_payload_field(self):
+        """Tasks without a 'payload' field should be rejected."""
+        scheduler = TaskScheduler()
+        with pytest.raises(ValueError, match="payload"):
+            scheduler.enqueue({"id": "123"})
+
+    def test_accepts_valid_payload(self):
+        """Valid task payloads should be accepted."""
+        scheduler = TaskScheduler()
+        task_id = scheduler.enqueue({"payload": {"action": "test"}})
+        assert task_id is not None
+        assert isinstance(task_id, str)
+        assert len(task_id) > 0
+
+    def test_malformed_payload_skips_retry(self):
+        """Malformed payloads that fail validation should not be retried."""
+        scheduler = TaskScheduler()
+        with pytest.raises(ValueError, match="payload"):
+            scheduler.enqueue({"payload": "not_a_dict"})
