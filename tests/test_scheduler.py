@@ -1,5 +1,5 @@
 import pytest
-from src.orchestrator.scheduler import TaskScheduler
+from src.orchestrator.scheduler import TaskScheduler, BatchAckError
 
 
 class TestTaskScheduler:
@@ -36,120 +36,78 @@ class TestTaskScheduler:
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.fail(task["id"])
 
-# 2019-01-09T19:07:03 update
 
-# 2019-02-18T12:30:02 update
+class TestBatchAcknowledgement:
+    def setup_method(self):
+        self.scheduler = TaskScheduler()
 
-# 2019-04-11T16:04:51 update
+    def _dequeue_tasks(self, count=1, worker_id="worker-1"):
+        """Helper to dequeue tasks using a specific worker."""
+        import asyncio
+        tasks = []
+        for _ in range(count):
+            self.scheduler.enqueue({"type": "test", "data": 1})
+        for _ in range(count):
+            task = asyncio.run(self.scheduler.dequeue(worker_id=worker_id))
+            if task:
+                tasks.append(task)
+        return tasks
 
-# 2019-04-17T16:25:46 update
+    def test_batch_acknowledge_all_owned(self):
+        """Worker can acknowledge all its owned tasks in a batch."""
+        tasks = self._dequeue_tasks(3, "worker-1")
+        task_ids = [t["id"] for t in tasks]
+        acked, rejected = self.scheduler.batch_acknowledge(task_ids, "worker-1")
+        assert acked == 3
+        assert rejected == []
+        assert self.scheduler._in_flight_by_worker.get("worker-1", set()) == set()
 
-# 2019-05-24T19:32:13 update
+    def test_batch_acknowledge_partial_rejected(self):
+        """Tasks not owned by the worker are rejected."""
+        tasks = self._dequeue_tasks(2, "worker-1")
+        owned_ids = [t["id"] for t in tasks]
+        foreign_ids = ["not-owned-1", "not-owned-2"]
+        all_ids = owned_ids + foreign_ids
+        acked, rejected = self.scheduler.batch_acknowledge(all_ids, "worker-1")
+        assert acked == 2
+        assert len(rejected) == 2
+        assert "not-owned-1" in rejected
 
-# 2019-07-02T12:54:25 update
+    def test_batch_acknowledge_wrong_worker_raises(self):
+        """A worker with no in-flight tasks raises BatchAckError."""
+        self._dequeue_tasks(1, "worker-1")
+        with pytest.raises(BatchAckError, match="has no in-flight tasks"):
+            self.scheduler.batch_acknowledge(["fake-id"], "worker-2")
 
-# 2019-07-03T20:37:00 update
+    def test_batch_acknowledge_empty_list(self):
+        """Empty task list returns zeros."""
+        acked, rejected = self.scheduler.batch_acknowledge([], "any-worker")
+        assert acked == 0
+        assert rejected == []
 
-# 2019-08-21T19:37:17 update
+    def test_batch_acknowledge_idempotent(self):
+        """Acknowledging the same task twice is safe (second call is no-op)."""
+        tasks = self._dequeue_tasks(1, "worker-1")
+        task_id = tasks[0]["id"]
+        acked1, rejected1 = self.scheduler.batch_acknowledge([task_id], "worker-1")
+        assert acked1 == 1
+        acked2, rejected2 = self.scheduler.batch_acknowledge([task_id], "worker-1")
+        assert acked2 == 0
+        assert task_id in rejected2
 
-# 2019-10-18T10:30:31 update
+    def test_dequeue_with_worker_id_tracks_ownership(self):
+        """Dequeued tasks are tracked under the correct worker."""
+        import asyncio
+        self.scheduler.enqueue({"type": "a"})
+        task = asyncio.run(self.scheduler.dequeue(worker_id="custom-worker"))
+        assert task is not None
+        assert "custom-worker" in self.scheduler._in_flight_by_worker
+        assert task["id"] in self.scheduler._in_flight_by_worker["custom-worker"]
 
-# 2019-10-25T09:01:38 update
-
-# 2019-10-29T12:59:34 update
-
-# 2019-11-05T10:07:06 update
-
-# 2019-11-11T10:43:52 update
-
-# 2020-01-17T13:40:02 update
-
-# 2020-02-07T14:06:34 update
-
-# 2020-04-03T08:53:40 update
-
-# 2020-04-06T19:36:29 update
-
-# 2020-05-12T11:51:05 update
-
-# 2020-08-17T08:37:15 update
-
-# 2020-09-15T10:39:38 update
-
-# 2020-10-06T11:26:19 update
-
-# 2020-10-21T13:32:43 update
-
-# 2020-12-14T18:18:36 update
-
-# 2020-12-23T17:15:03 update
-
-# 2021-01-25T16:29:00 update
-
-# 2021-02-23T11:23:50 update
-
-# 2021-03-19T12:21:19 update
-
-# 2021-07-29T18:48:25 update
-
-# 2021-08-25T12:46:58 update
-
-# 2021-09-09T16:27:13 update
-
-# 2021-12-16T12:05:30 update
-
-# 2022-05-07T14:05:12 update
-
-# 2022-07-18T20:52:29 update
-
-# 2022-07-31T18:42:26 update
-
-# 2022-09-09T13:10:08 update
-
-# 2023-01-04T15:16:57 update
-
-# 2023-01-17T14:49:04 update
-
-# 2023-02-15T13:51:30 update
-
-# 2023-03-08T09:15:53 update
-
-# 2023-03-23T16:32:20 update
-
-# 2023-03-28T09:32:01 update
-
-# 2023-05-05T17:28:22 update
-
-# 2023-06-01T08:13:52 update
-
-# 2023-06-20T09:58:10 update
-
-# 2023-07-04T16:14:34 update
-
-# 2023-07-17T20:49:40 update
-
-# 2023-12-26T11:49:18 update
-
-# 2024-05-27T11:00:06 update
-
-# 2024-07-04T08:53:03 update
-
-# 2024-07-18T16:19:02 update
-
-# 2024-08-07T09:35:35 update
-
-# 2024-08-22T14:32:14 update
-
-# 2025-05-20T14:19:23 update
-
-# 2025-07-17T17:54:48 update
-
-# 2025-07-28T13:06:30 update
-
-# 2025-12-22T19:05:25 update
-
-# 2026-01-08T18:43:02 update
-
-# 2026-01-12T16:53:28 update
-
-# 2026-04-16T16:58:23 update
+    def test_complete_cleans_worker_tracking(self):
+        """Completing a task removes it from the worker tracking set."""
+        import asyncio
+        self.scheduler.enqueue({"type": "a"})
+        task = asyncio.run(self.scheduler.dequeue(worker_id="w1"))
+        self.scheduler.complete(task["id"])
+        assert task["id"] not in self.scheduler._in_flight_by_worker.get("w1", set())
