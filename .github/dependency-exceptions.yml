@@ -1,0 +1,16 @@
+# Dependency Review Exception Manifest
+# Each entry records a time-bound exception for a dependency review failure.
+# Fields:
+#   dependency:  The pip/PyPI package name (or GH action ref)
+#   reason:      Why the exception was granted
+#   owner:       Person/team responsible
+#   expires:     ISO 8601 date after which CI will fail again
+#   created:     When the exception was created
+
+exceptions:
+  # Example:
+  # - dependency: "example-package==1.2.3"
+  #   reason: "Upstream fix pending, tracked in #1234"
+  #   owner: "alice@example.com"
+  #   expires: "2026-06-01"
+  #   created: "2026-05-01"

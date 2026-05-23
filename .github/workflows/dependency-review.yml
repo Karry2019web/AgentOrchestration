@@ -1,0 +1,140 @@
+name: Dependency Review
+
+on:
+  pull_request:
+    paths:
+      - 'pyproject.toml'
+      - '.github/dependency-exceptions.yml'
+  push:
+    branches: [main, develop]
+    paths:
+      - 'pyproject.toml'
+      - '.github/dependency-exceptions.yml'
+  workflow_dispatch:
+
+jobs:
+  validate-exceptions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Validate exception manifest
+        run: |
+          python -c "
+import yaml, sys, os
+from datetime import datetime, timezone
+
+manifest_path = '.github/dependency-exceptions.yml'
+if not os.path.exists(manifest_path):
+    print('No manifest found -- no exceptions to validate.')
+    sys.exit(0)
+
+with open(manifest_path) as f:
+    data = yaml.safe_load(f)
+
+exceptions = data.get('exceptions', [])
+if not exceptions:
+    print('No exceptions defined -- nothing to validate.')
+    sys.exit(0)
+
+errors = []
+now = datetime.now(timezone.utc).date()
+
+for i, exc in enumerate(exceptions):
+    dep = exc.get('dependency', '')
+    idx = f'exception #{i+1}'
+    if dep:
+        idx = f'{dep} ({idx})'
+    if not exc.get('owner'):
+        errors.append(f'{idx}: missing owner')
+    if not exc.get('reason'):
+        errors.append(f'{idx}: missing reason')
+    if not exc.get('expires'):
+        errors.append(f'{idx}: missing expires')
+    else:
+        try:
+            exp = datetime.fromisoformat(exc['expires']).date()
+            if exp < now:
+                errors.append(f'{idx}: expired on {exc["expires"]}')
+        except:
+            errors.append(f'{idx}: invalid expires date: {exc["expires"]}')
+    if not exc.get('created'):
+        errors.append(f'{idx}: missing created date')
+
+if errors:
+    print('Dependency exception validation FAILED:')
+    for e in errors:
+        print(f'  - {e}')
+    sys.exit(1)
+else:
+    print(f'All {len(exceptions)} exception(s) valid.')
+    for exc in exceptions:
+        print(f'  - {exc["dependency"]}: owner={exc.get("owner", "?")}, expires={exc.get("expires", "?")}')
+"
+
+  review-summary:
+    runs-on: ubuntu-latest
+    needs: validate-exceptions
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Generate dependency review summary
+        run: |
+          python -c "
+import os, yaml
+
+manifest_path = '.github/dependency-exceptions.yml'
+if not os.path.exists(manifest_path):
+    print('No exception manifest found.')
+    exit(0)
+
+with open(manifest_path) as f:
+    data = yaml.safe_load(f) or {}
+excs = data.get('exceptions', [])
+if excs:
+    print('## Dependency Exception Review')
+    print()
+    for exc in excs:
+        dep = exc.get('dependency', '?')
+        owner = exc.get('owner', '?')
+        reason = exc.get('reason', '?')
+        expires = exc.get('expires', '?')
+        print(f'- **{dep}** -- owner: {owner}, reason: {reason}, expires: {expires}')
+    print()
+    print(f'Total active exceptions: {len(excs)}')
+else:
+    print('No active dependency exceptions.')
+" >> $GITHUB_STEP_SUMMARY
+
+      - name: Post summary to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+            if (fs.existsSync(summaryPath)) {
+              const summary = fs.readFileSync(summaryPath, 'utf8');
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: summary
+              });
+            }
