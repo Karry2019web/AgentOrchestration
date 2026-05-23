@@ -1,13 +1,111 @@
 """API middleware components."""
 
+import contextvars
+import hashlib
 import time
 import logging
-from typing import Callable
+import uuid
+from typing import Callable, Optional
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
+
+# Per-request context vars for tenant-isolated correlation
+_correlation_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("correlation_id", default="")
+_tenant_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("tenant_id", default="")
+_request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="")
+
+
+def get_correlation_id() -> str:
+    return _correlation_id_var.get()
+
+
+def get_tenant_id() -> str:
+    return _tenant_id_var.get()
+
+
+def get_request_id() -> str:
+    return _request_id_var.get()
+
+
+class TenantCorrelationMiddleware(BaseHTTPMiddleware):
+    """Enforces tenant-bound correlation IDs across requests.
+
+    - Assigns per-request correlation and request IDs.
+    - Scopes correlation IDs to the authenticated tenant (from X-Tenant-Id header).
+    - Rejects requests where the correlation ID header implies a different tenant.
+    - Clears all context vars in finally blocks (success, rejection, exception).
+    - Adds X-Correlation-Id and X-Request-Id response headers.
+    """
+
+    def __init__(self, app):
+        super().__init__(app)
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        request_id = str(uuid.uuid4())
+        correlation_id = request.headers.get("X-Correlation-Id", str(uuid.uuid4()))
+        tenant_id = request.headers.get("X-Tenant-Id", "default")
+        role = request.headers.get("X-Role", "viewer")
+
+        # Scoped correlation IDs: if a correlation ID already contains a tenant
+        # prefix, it must match the current request's tenant
+        if ":" in correlation_id:
+            embedded_tenant = correlation_id.split(":", 1)[0]
+            if embedded_tenant != tenant_id:
+                logger.warning(
+                    f"Rejected request {request_id}: correlation ID tenant "
+                    f"'{embedded_tenant}' does not match header tenant '{tenant_id}'"
+                )
+                return Response(
+                    status_code=403,
+                    content="Correlation ID tenant mismatch",
+                    headers={
+                        "X-Request-Id": request_id,
+                        "X-Correlation-Id": correlation_id,
+                    },
+                )
+
+        # Prefixed correlation ID with tenant scope
+        scoped_correlation = f"{tenant_id}:{correlation_id.split(':', 1)[-1]}"
+
+        # Set context vars for downstream use
+        token_c = _correlation_id_var.set(scoped_correlation)
+        token_t = _tenant_id_var.set(tenant_id)
+        token_r = _request_id_var.set(request_id)
+
+        try:
+            response = await call_next(request)
+            response.headers["X-Request-Id"] = request_id
+
+            # Only send scoped correlation header if not already set downstream
+            if "X-Correlation-Id" not in response.headers:
+                response.headers["X-Correlation-Id"] = scoped_correlation
+
+            # Sanitized log: hash the tenant for log safety
+            tenant_hash = hashlib.sha256(tenant_id.encode()).hexdigest()[:8]
+            logger.debug(
+                f"{request.method} {request.url.path} "
+                f"corr={scoped_correlation[:16]} "
+                f"tenant={tenant_hash} "
+                f"status={response.status_code}"
+            )
+            return response
+        except Exception:
+            logger.exception(
+                f"Unhandled exception for request {request_id} "
+                f"(correlation={scoped_correlation[:16]})"
+            )
+            return Response(
+                status_code=500,
+                content="Internal Server Error",
+                headers={"X-Request-Id": request_id},
+            )
+        finally:
+            _correlation_id_var.reset(token_c)
+            _tenant_id_var.reset(token_t)
+            _request_id_var.reset(token_r)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -49,131 +147,3 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         duration = time.time() - start
         logger.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s")
         return response
-
-# 2019-03-01T18:35:19 update
-
-# 2019-04-03T13:22:05 update
-
-# 2019-04-30T17:18:49 update
-
-# 2019-08-20T09:29:03 update
-
-# 2019-08-30T15:52:06 update
-
-# 2019-11-23T16:58:42 update
-
-# 2020-02-18T10:04:07 update
-
-# 2020-04-21T17:35:30 update
-
-# 2020-05-22T11:10:34 update
-
-# 2020-07-02T12:31:26 update
-
-# 2020-07-05T13:52:59 update
-
-# 2020-08-21T20:36:45 update
-
-# 2021-01-19T09:17:15 update
-
-# 2021-01-29T11:34:24 update
-
-# 2021-02-04T15:21:21 update
-
-# 2021-04-19T19:23:15 update
-
-# 2021-05-20T16:50:15 update
-
-# 2021-06-22T19:23:44 update
-
-# 2021-09-09T13:44:55 update
-
-# 2021-09-16T09:30:20 update
-
-# 2021-10-14T20:42:33 update
-
-# 2021-12-28T16:39:14 update
-
-# 2022-01-26T19:07:27 update
-
-# 2022-01-28T08:03:41 update
-
-# 2022-03-23T12:17:02 update
-
-# 2022-04-06T12:12:27 update
-
-# 2022-04-21T14:53:01 update
-
-# 2022-06-30T08:37:32 update
-
-# 2022-07-06T10:44:45 update
-
-# 2022-11-02T11:12:47 update
-
-# 2022-11-15T20:54:21 update
-
-# 2022-11-23T14:13:34 update
-
-# 2023-01-26T10:03:44 update
-
-# 2023-02-09T17:08:10 update
-
-# 2023-02-16T10:04:00 update
-
-# 2023-03-14T11:52:03 update
-
-# 2023-04-10T12:42:07 update
-
-# 2023-04-26T10:43:39 update
-
-# 2023-06-27T08:18:07 update
-
-# 2023-08-30T15:30:40 update
-
-# 2023-08-30T14:10:05 update
-
-# 2023-10-09T18:32:46 update
-
-# 2023-11-21T20:35:55 update
-
-# 2024-03-07T19:17:39 update
-
-# 2024-04-01T18:06:19 update
-
-# 2024-07-18T15:37:34 update
-
-# 2024-07-25T09:21:53 update
-
-# 2024-08-12T14:24:22 update
-
-# 2024-11-18T08:50:54 update
-
-# 2025-04-08T12:43:05 update
-
-# 2025-06-03T08:10:47 update
-
-# 2025-06-12T08:37:52 update
-
-# 2025-06-17T08:36:56 update
-
-# 2025-07-02T18:09:42 update
-
-# 2025-07-22T12:39:21 update
-
-# 2025-10-13T12:13:46 update
-
-# 2025-12-05T09:44:22 update
-
-# 2025-12-22T18:34:47 update
-
-# 2026-01-26T15:36:23 update
-
-# 2026-02-13T12:36:40 update
-
-# 2026-02-26T11:07:15 update
-
-# 2026-03-19T11:00:17 update
-
-# 2026-03-27T12:58:53 update
-
-# 2026-05-12T17:19:36 update
