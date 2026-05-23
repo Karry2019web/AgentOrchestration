@@ -1,160 +1,132 @@
-"""Orchestrator API client SDK."""
+﻿"""Orchestrator API client SDK."""
 
 import json
 import os
-from typing import Any, Dict, List, Optional
+import socket
+import time
+from typing import Any, Dict, Optional
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
+
+
+class DNSFailureHandler:
+    """Circuit breaker for DNS resolution failures per hostname."""
+
+    _failures: Dict[str, int] = {}
+    _circuit_open_until: Dict[str, float] = {}
+    FAILURE_THRESHOLD = 3
+    COOLDOWN_SECONDS = 30.0
+
+    @classmethod
+    def record_failure(cls, hostname: str) -> None:
+        cls._failures[hostname] = cls._failures.get(hostname, 0) + 1
+        if cls._failures[hostname] >= cls.FAILURE_THRESHOLD:
+            cls._circuit_open_until[hostname] = time.time() + cls.COOLDOWN_SECONDS
+
+    @classmethod
+    def record_success(cls, hostname: str) -> None:
+        cls._failures.pop(hostname, None)
+        cls._circuit_open_until.pop(hostname, None)
+
+    @classmethod
+    def is_open(cls, hostname: str) -> bool:
+        until = cls._circuit_open_until.get(hostname, 0)
+        if until == 0:
+            return False
+        if time.time() >= until:
+            cls.reset(hostname)
+            return False
+        return True
+
+    @classmethod
+    def reset(cls, hostname=None):
+        if hostname:
+            cls._failures.pop(hostname, None)
+            cls._circuit_open_until.pop(hostname, None)
+        else:
+            cls._failures.clear()
+            cls._circuit_open_until.clear()
+
+
+def _resolve_hostname(url):
+    try:
+        parsed = url.split("://", 1)[1] if "://" in url else url
+        host = parsed.split("/")[0].split(":")[0]
+        socket.getaddrinfo(host, 80)
+        return host
+    except (socket.gaierror, OSError, IndexError):
+        return None
 
 
 class OrchestratorClient:
-    def __init__(self, base_url: str = None, api_key: str = None):
+    def __init__(self, base_url=None, api_key=None):
         self.base_url = base_url or os.getenv("AO_API_URL", "https://api.agent-orchestrator.io")
         self.api_key = api_key or os.getenv("AO_API_KEY", "")
         self._session = None
 
-    def _request(self, method: str, path: str, data: Dict = None) -> Dict:
+    def _request(self, method, path, data=None):
         url = f"{self.base_url}/api/v2{path}"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        host_parts = url.split("://", 1)
+        hostname = host_parts[1].split("/")[0].split(":")[0] if len(host_parts) > 1 else url
+
+        if DNSFailureHandler.is_open(hostname):
+            return {"error": "dns_circuit_open", "message": "DNS resolution for " + hostname + " temporarily blocked"}
+
+        headers = {"Authorization": "Bearer " + self.api_key, "Content-Type": "application/json"}
         body = json.dumps(data).encode() if data else None
-        req = Request(url, data=body, headers=headers, method=method)
 
-        try:
-            with urlopen(req) as resp:
-                return json.loads(resp.read().decode())
-        except HTTPError as e:
-            return {"error": e.code, "message": e.reason}
+        last_error = None
+        for attempt in range(3):
+            try:
+                resolved = _resolve_hostname(url)
+                if resolved is None:
+                    DNSFailureHandler.record_failure(hostname)
+                    return {"error": "dns_failure", "message": "Could not resolve hostname: " + hostname}
 
-    def register_agent(self, name: str, agent_type: str, config: Dict = None) -> Dict:
-        return self._request("POST", "/agents", {
-            "name": name,
-            "agent_type": agent_type,
-            "config": config or {},
-        })
+                req = Request(url, data=body, headers=headers, method=method)
+                with urlopen(req, timeout=10) as resp:
+                    DNSFailureHandler.record_success(hostname)
+                    return json.loads(resp.read().decode())
 
-    def list_agents(self, status: str = None) -> Dict:
+            except URLError as e:
+                reason_str = str(e.reason).lower() if e.reason else ""
+                is_dns = any(kw in reason_str for kw in ["name or service not known", "temporary failure", "nodename nor servname", "getaddrinfo", "dns"])
+                if is_dns and attempt < 2:
+                    delay = (2 ** attempt) * 0.5
+                    time.sleep(delay)
+                    last_error = {"error": "dns_failure", "message": str(e.reason)}
+                    continue
+                elif is_dns:
+                    DNSFailureHandler.record_failure(hostname)
+                    return {"error": "dns_failure", "message": "DNS resolution failed after 3 retries for " + hostname + ": " + str(e.reason)}
+                return {"error": "connection_error", "message": str(e.reason)}
+
+            except socket.timeout:
+                return {"error": "timeout", "message": "Request timed out for " + url}
+
+            except HTTPError as e:
+                DNSFailureHandler.record_success(hostname)
+                return {"error": e.code, "message": e.reason}
+
+        return last_error or {"error": "unknown", "message": "Request failed after all retries"}
+
+    def register_agent(self, name, agent_type, config=None):
+        return self._request("POST", "/agents", {"name": name, "agent_type": agent_type, "config": config or {}})
+
+    def list_agents(self, status=None):
         path = "/agents"
         if status:
-            path += f"?status={status}"
+            path += "?status=" + status
         return self._request("GET", path)
 
-    def get_agent(self, agent_id: str) -> Dict:
-        return self._request("GET", f"/agents/{agent_id}")
+    def get_agent(self, agent_id):
+        return self._request("GET", "/agents/" + agent_id)
 
-    def delete_agent(self, agent_id: str) -> Dict:
-        return self._request("DELETE", f"/agents/{agent_id}")
+    def delete_agent(self, agent_id):
+        return self._request("DELETE", "/agents/" + agent_id)
 
-    def start_agent(self, agent_id: str) -> Dict:
-        return self._request("POST", f"/agents/{agent_id}/start")
+    def start_agent(self, agent_id):
+        return self._request("POST", "/agents/" + agent_id + "/start")
 
-    def stop_agent(self, agent_id: str) -> Dict:
-        return self._request("POST", f"/agents/{agent_id}/stop")
-
-# 2019-01-22T18:13:52 update
-
-# 2019-04-10T16:03:03 update
-
-# 2019-06-26T09:36:49 update
-
-# 2019-08-16T09:00:05 update
-
-# 2019-08-26T19:43:11 update
-
-# 2019-09-23T14:45:30 update
-
-# 2019-10-21T11:37:53 update
-
-# 2020-01-10T10:26:07 update
-
-# 2020-02-12T09:30:49 update
-
-# 2020-03-08T08:00:29 update
-
-# 2020-03-16T19:59:51 update
-
-# 2020-03-30T17:37:46 update
-
-# 2021-02-05T19:46:37 update
-
-# 2021-02-22T16:54:35 update
-
-# 2021-03-19T15:58:33 update
-
-# 2021-04-15T08:14:13 update
-
-# 2021-05-31T14:33:37 update
-
-# 2021-07-15T18:08:40 update
-
-# 2021-08-24T11:47:00 update
-
-# 2021-12-30T12:02:52 update
-
-# 2022-01-20T13:18:43 update
-
-# 2022-06-17T10:50:38 update
-
-# 2022-11-15T19:15:06 update
-
-# 2023-05-15T18:16:27 update
-
-# 2023-06-22T14:34:00 update
-
-# 2023-07-13T18:44:28 update
-
-# 2023-08-23T19:53:34 update
-
-# 2023-11-17T08:37:45 update
-
-# 2024-01-31T16:24:31 update
-
-# 2024-01-31T08:14:03 update
-
-# 2024-02-01T09:10:23 update
-
-# 2024-07-22T19:04:53 update
-
-# 2024-09-03T09:17:20 update
-
-# 2024-11-13T11:27:07 update
-
-# 2025-01-16T20:56:50 update
-
-# 2025-04-14T16:10:30 update
-
-# 2025-04-16T08:42:38 update
-
-# 2025-05-02T08:11:40 update
-
-# 2025-07-04T18:10:30 update
-
-# 2025-07-23T09:21:21 update
-
-# 2025-09-05T17:05:59 update
-
-# 2025-09-09T15:51:23 update
-
-# 2025-11-14T11:34:48 update
-
-# 2025-12-18T18:16:23 update
-
-# 2025-12-18T14:56:18 update
-
-# 2025-12-18T12:41:47 update
-
-# 2026-02-17T20:41:29 update
-
-# 2026-03-18T12:20:20 update
-
-# 2026-03-20T13:32:14 update
-
-# 2026-03-31T16:25:41 update
-
-# 2026-04-07T11:14:09 update
-
-# 2026-05-11T08:44:28 update
-
-# 2026-05-14T13:49:57 update
+    def stop_agent(self, agent_id):
+        return self._request("POST", "/agents/" + agent_id + "/stop")
