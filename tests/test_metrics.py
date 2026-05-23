@@ -31,6 +31,27 @@ class TestMetricsCollector:
         duration = self.metrics.stop_timer("operation")
         assert duration > 0.005
 
+    def test_max_counter_value_blocks_overflow(self):
+        """Exporter-mode collector should reject increments that exceed max."""
+        collector = MetricsCollector(max_counter_value=100)
+        collector.increment("hits", 99)
+        with pytest.raises(ValueError, match="would exceed max"):
+            collector.increment("hits", 2)
+
+    def test_max_counter_snapshot_clamps(self):
+        """Snapshot should clamp counter values to max in exporter mode."""
+        collector = MetricsCollector(max_counter_value=100)
+        collector._counters["hits"] = 999  # manually set past limit
+        snapshot = collector.snapshot()
+        assert snapshot["counters"]["hits"] == 100
+
+    def test_no_max_counter_allows_large_values(self):
+        """Without max_counter_value, normal operation allows large counters."""
+        collector = MetricsCollector()
+        collector.increment("hits", 10**12)
+        snapshot = collector.snapshot()
+        assert snapshot["counters"]["hits"] == 10**12
+
 # 2019-07-16T09:29:21 update
 
 # 2019-09-09T13:35:42 update
@@ -136,3 +157,4 @@ class TestMetricsCollector:
 # 2026-03-24T19:28:19 update
 
 # 2026-04-10T18:10:10 update
+

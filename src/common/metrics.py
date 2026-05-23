@@ -2,21 +2,32 @@
 
 import time
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Optional
 from threading import Lock
 
 
+# Common backend integer limits (e.g. Redis signed 64-bit: 2^63-1)
+DEFAULT_MAX_COUNTER = 2**63 - 1  # Max safe for most backends (Redis, Prometheus, etc.)
+
+
 class MetricsCollector:
-    def __init__(self):
+    def __init__(self, max_counter_value: Optional[int] = None):
         self._lock = Lock()
         self._counters: Dict[str, int] = defaultdict(int)
         self._gauges: Dict[str, float] = {}
         self._histograms: Dict[str, List[float]] = defaultdict(list)
         self._timers: Dict[str, float] = {}
+        self._max_counter_value = max_counter_value
 
     def increment(self, metric: str, value: int = 1) -> None:
         with self._lock:
-            self._counters[metric] += value
+            new_value = self._counters[metric] + value
+            if self._max_counter_value is not None and new_value > self._max_counter_value:
+                raise ValueError(
+                    f"Counter '{metric}' would exceed max value {self._max_counter_value} "
+                    f"(current: {self._counters[metric]}, increment: {value})"
+                )
+            self._counters[metric] = new_value
 
     def gauge(self, metric: str, value: float) -> None:
         with self._lock:
@@ -40,8 +51,13 @@ class MetricsCollector:
 
     def snapshot(self) -> Dict:
         with self._lock:
+            counters = dict(self._counters)
+            # Clamp counter values to max if configured (exporter safety)
+            if self._max_counter_value is not None:
+                for key, val in counters.items():
+                    counters[key] = min(val, self._max_counter_value)
             return {
-                "counters": dict(self._counters),
+                "counters": counters,
                 "gauges": dict(self._gauges),
                 "histograms": {k: {"count": len(v), "sum": sum(v), "avg": sum(v) / len(v) if v else 0}
                                for k, v in self._histograms.items()},
@@ -142,50 +158,3 @@ metrics = MetricsCollector()
 
 # 2023-09-16T20:55:20 update
 
-# 2023-12-08T16:55:55 update
-
-# 2024-01-04T15:47:36 update
-
-# 2024-01-05T14:46:16 update
-
-# 2024-04-08T10:08:30 update
-
-# 2024-04-08T20:31:02 update
-
-# 2024-08-13T17:18:11 update
-
-# 2024-09-13T08:11:06 update
-
-# 2024-12-06T11:42:59 update
-
-# 2025-02-03T11:41:46 update
-
-# 2025-03-22T09:28:10 update
-
-# 2025-04-06T11:12:26 update
-
-# 2025-04-09T13:39:45 update
-
-# 2025-08-07T15:56:14 update
-
-# 2025-08-20T10:41:17 update
-
-# 2025-10-16T17:51:05 update
-
-# 2025-10-16T14:29:07 update
-
-# 2025-12-05T13:05:17 update
-
-# 2025-12-12T09:49:47 update
-
-# 2025-12-19T13:59:03 update
-
-# 2026-01-13T16:00:24 update
-
-# 2026-02-05T14:23:35 update
-
-# 2026-03-13T08:25:05 update
-
-# 2026-04-23T12:24:44 update
-
-# 2026-05-18T20:56:34 update
