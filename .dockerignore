@@ -1,0 +1,55 @@
+# --- Environment ---
+.env
+.env.*
+!.env.example
+*.env.local
+*.env.development.local
+*.env.test.local
+*.env.production.local
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- IDE & Editors ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# --- Project local ---
+logs/
+*.log
+data/
+tmp/
+scratch/
+debug/
+output/
+notebooks/
+
+# --- OS ---
+Thumbs.db
+*.bak
+*.orig
+
+# --- Git ---
+.git/
+.gitattributes
+.gitignore

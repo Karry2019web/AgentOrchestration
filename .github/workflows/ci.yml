@@ -27,3 +27,12 @@ jobs:
         run: uv run pytest --cov=src tests/
       - name: Lint
         run: uv run flake8 src/ tests/
+
+  docker-context:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Docker build context
+        run: |
+          chmod +x scripts/check-docker-context.sh
+          bash scripts/check-docker-context.sh .
