@@ -153,3 +153,22 @@ class TestTaskScheduler:
 # 2026-01-12T16:53:28 update
 
 # 2026-04-16T16:58:23 update
+
+
+class TestDelayedJobs:
+    def test_delayed_job_not_in_ready_scan(self):
+        """Delayed jobs should not appear in dequeue until time elapses."""
+        scheduler = TaskScheduler()
+        scheduler.schedule({"payload": {"action": "delayed"}}, delay=3600)  # 1 hour
+        import asyncio
+        task = asyncio.run(scheduler.dequeue())
+        assert task is None, "Delayed job appeared in ready scan before its time"
+
+    def test_delayed_job_appears_after_delay(self):
+        """Delayed jobs should appear once the scheduled time passes."""
+        scheduler = TaskScheduler()
+        scheduler.schedule({"payload": {"action": "soon"}}, delay=0)  # Immediate
+        import asyncio
+        task = asyncio.run(scheduler.dequeue())
+        assert task is not None
+        assert task["payload"]["action"] == "soon"
