@@ -54,6 +54,44 @@ async def stop_agent(agent_id: str):
 async def agent_count():
     return {"count": registry.count()}
 
+from pydantic import BaseModel
+from typing import Any
+from .webhooks import WebhookError, webhooks
+
+
+class WebhookSubscriptionRequest(BaseModel):
+    target_url: str
+    filters: dict[str, Any] = {}
+
+
+@router.post("/webhooks/subscriptions")
+async def create_webhook_subscription(request: WebhookSubscriptionRequest):
+    try:
+        sub = webhooks.create_subscription(
+            workspace_id="default",
+            target_url=request.target_url,
+            filters=request.filters,
+        )
+    except WebhookError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=e.status_code, detail=e.message) from e
+    return {
+        "subscription_id": sub.subscription_id,
+        "target_url": sub.target_url,
+        "filters": sub.filters,
+        "enabled": sub.enabled,
+    }
+
+
+@router.post("/webhooks/subscriptions/{subscription_id}/disable")
+async def disable_webhook_subscription(subscription_id: str):
+    try:
+        sub = webhooks.disable_subscription(subscription_id, "default")
+    except WebhookError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=e.status_code, detail=e.message) from e
+    return {"subscription_id": sub.subscription_id, "enabled": sub.enabled}
+
 # 2019-03-18T11:10:18 update
 
 # 2019-04-22T13:58:05 update
