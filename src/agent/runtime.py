@@ -1,4 +1,4 @@
-"""Agent Runtime — Manages agent process lifecycle."""
+"""Agent Runtime — Manages agent process lifecycle with memory limit enforcement."""
 
 import os
 import signal
@@ -19,16 +19,53 @@ class RuntimeState(Enum):
 
 
 class AgentRuntime:
-    def __init__(self):
+    """Manages agent subprocess lifecycle with bounded process allocation.
+
+    Enforces a configurable ``max_processes`` cap to prevent unbounded
+    resource consumption.  When the limit is reached, :meth:`start` returns
+    ``False`` and logs a warning — the caller is responsible for retrying
+    or shedding load.
+    """
+
+    def __init__(self, max_processes: int = 50):
+        self.max_processes = max_processes
         self._processes: Dict[str, subprocess.Popen] = {}
         self._states: Dict[str, RuntimeState] = {}
+        self._total_started: int = 0  # monotonic counter for diagnostics
 
-    def start(self, agent_id: str, command: list, env: Optional[Dict] = None) -> bool:
-        if agent_id in self._processes and self._processes[agent_id].poll() is None:
-            logger.warning(f"Agent {agent_id} is already running")
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def start(self, agent_id: str, command: list,
+              env: Optional[Dict] = None) -> bool:
+        """Start a new agent process.
+
+        Returns ``True`` on success, ``False`` when the agent is already
+        running **or** when the process cap (``max_processes``) has been
+        reached.
+        """
+        # ---- 1. Duplicate guard ------------------------------------------------
+        if agent_id in self._processes:
+            proc = self._processes[agent_id]
+            if proc.poll() is None:
+                logger.warning("Agent %s is already running", agent_id)
+                return False
+            # Process has exited — clear stale entry
+            self._cleanup(agent_id)
+
+        # ---- 2. Capacity guard (memory / trace aggregation limit) -------------
+        active_count = self._active_count()
+        if active_count >= self.max_processes:
+            logger.warning(
+                "Agent process cap reached (%d/%d).  Rejecting start for %s.",
+                active_count, self.max_processes, agent_id,
+            )
             return False
 
+        # ---- 3. State transition: STARTING ------------------------------------
         self._states[agent_id] = RuntimeState.STARTING
+
         process_env = os.environ.copy()
         if env:
             process_env.update(env)
@@ -43,14 +80,20 @@ class AgentRuntime:
             )
             self._processes[agent_id] = proc
             self._states[agent_id] = RuntimeState.RUNNING
-            logger.info(f"Agent {agent_id} started (PID: {proc.pid})")
+            self._total_started += 1
+            logger.info(
+                "Agent %s started (PID: %d, active: %d/%d)",
+                agent_id, proc.pid, active_count + 1, self.max_processes,
+            )
             return True
         except Exception as e:
             self._states[agent_id] = RuntimeState.CRASHED
-            logger.error(f"Failed to start agent {agent_id}: {e}")
+            self._cleanup(agent_id)
+            logger.error("Failed to start agent %s: %s", agent_id, e)
             return False
 
     def stop(self, agent_id: str, timeout: int = 10) -> bool:
+        """Stop an agent process gracefully, then force-kill if needed."""
         proc = self._processes.get(agent_id)
         if not proc or proc.poll() is not None:
             return False
@@ -64,18 +107,55 @@ class AgentRuntime:
             proc.wait()
 
         self._states[agent_id] = RuntimeState.STOPPED
-        logger.info(f"Agent {agent_id} stopped")
+        self._cleanup(agent_id)
+        logger.info("Agent %s stopped", agent_id)
         return True
 
     def get_state(self, agent_id: str) -> RuntimeState:
+        """Return the current lifecycle state of an agent process."""
         proc = self._processes.get(agent_id)
         if proc and proc.poll() is not None:
             self._states[agent_id] = RuntimeState.CRASHED
+            self._cleanup(agent_id)
         return self._states.get(agent_id, RuntimeState.STOPPED)
 
     def is_running(self, agent_id: str) -> bool:
+        """Check whether an agent process is currently alive."""
         proc = self._processes.get(agent_id)
         return proc is not None and proc.poll() is None
+
+    # ------------------------------------------------------------------
+    # Diagnostics / introspection
+    # ------------------------------------------------------------------
+
+    def active_count(self) -> int:
+        """Number of currently running agent processes."""
+        return self._active_count()
+
+    def total_started(self) -> int:
+        """Total number of agent processes started since instantiation."""
+        return self._total_started
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _active_count(self) -> int:
+        """Count running processes, pruning dead entries as a side-effect."""
+        dead = []
+        for aid, proc in self._processes.items():
+            if proc.poll() is not None:
+                dead.append(aid)
+        for aid in dead:
+            self._cleanup(aid)
+        return len(self._processes) - len(dead)
+
+    def _cleanup(self, agent_id: str) -> None:
+        """Remove stale entries from internal bookkeeping."""
+        self._processes.pop(agent_id, None)
+        # Keep last-known state for diagnostics but allow re-registration
+        if agent_id in self._states:
+            del self._states[agent_id]
 
 # 2019-01-11T10:56:26 update
 
@@ -196,3 +276,4 @@ class AgentRuntime:
 # 2026-02-06T16:29:56 update
 
 # 2026-04-02T10:52:38 update
+
