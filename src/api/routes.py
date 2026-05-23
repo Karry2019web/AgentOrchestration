@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from typing import List, Dict, Optional
 
 from src.agent import AgentRegistry, AgentStatus
+from src.data.export import ExportFilterValidator, ExportJob, ExportValidationError
 
 router = APIRouter()
 registry = AgentRegistry()
@@ -53,6 +54,45 @@ async def stop_agent(agent_id: str):
 @router.get("/agents/count")
 async def agent_count():
     return {"count": registry.count()}
+
+
+@router.post("/exports")
+async def create_export(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    workspace: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    """Create a bulk export job with validated filters.
+
+    Filters are validated synchronously before the job is enqueued.
+    Invalid filters (bad dates, empty ranges, unknown statuses) are
+    rejected with a 422 response.
+    """
+    try:
+        export_job = ExportJob.create({
+            "date_from": date_from,
+            "date_to": date_to,
+            "workspace": workspace,
+            "status": status,
+        })
+    except ExportValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    # Enqueue the validated job
+    scheduler_task = {
+        "type": "export",
+        "payload": export_job.to_dict(),
+    }
+    task_id = registry._orchestrator.scheduler.enqueue(scheduler_task, queue="exports") if hasattr(registry, '_orchestrator') and registry._orchestrator else None
+
+    return {
+        "job_id": export_job.job_id,
+        "filter": export_job.filter.to_dict(),
+        "task_id": task_id,
+        "status": "created",
+    }
+
 
 # 2019-03-18T11:10:18 update
 
