@@ -15,6 +15,7 @@ class OrchestrationEngine:
     def __init__(self, max_workers: int = 10, agent_timeout: int = 300):
         self.registry = AgentRegistry()
         self.scheduler = TaskScheduler()
+        self.workflow_manager = None
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.agent_timeout = agent_timeout
         self._running = False
@@ -24,6 +25,12 @@ class OrchestrationEngine:
             "on_error": [],
             "on_complete": [],
         }
+
+    def set_workflow_manager(self, wf_manager) -> None:
+        """Link the workflow manager and wire deletion enforcement."""
+        self.workflow_manager = wf_manager
+        if wf_manager is not None:
+            wf_manager.set_scheduler(self.scheduler)
 
     def register_hook(self, event: str, callback: Callable) -> None:
         if event in self._hooks:

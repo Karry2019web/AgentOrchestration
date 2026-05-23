@@ -36,8 +36,15 @@ class TaskScheduler:
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
         self._max_retries = 3
+        self._deleted_workflows: set = set()
+        self._deletion_audit: Dict[str, float] = {}
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
+        workflow_id = task.get("workflow_id", "")
+        if workflow_id and workflow_id in self._deleted_workflows:
+            raise ValueError(
+                f"Cannot enqueue task for deleted workflow {workflow_id}"
+            )
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
@@ -49,6 +56,11 @@ class TaskScheduler:
         return task_id
 
     def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
+        workflow_id = task.get("workflow_id", "")
+        if workflow_id and workflow_id in self._deleted_workflows:
+            raise ValueError(
+                f"Cannot schedule task for deleted workflow {workflow_id}"
+            )
         task_id = str(uuid4())
         task["id"] = task_id
         self._scheduled[task_id] = time.time() + delay
@@ -71,6 +83,28 @@ class TaskScheduler:
 
     def complete(self, task_id: str) -> bool:
         return self._in_flight.pop(task_id, None) is not None
+
+    def mark_workflow_deleted(self, workflow_id: str) -> None:
+        """Mark a workflow as deleted so no new runs are created for it."""
+        self._deleted_workflows.add(workflow_id)
+        self._deletion_audit[workflow_id] = time.time()
+
+    def is_workflow_deleted(self, workflow_id: str) -> bool:
+        """Check if a workflow has been deleted."""
+        return workflow_id in self._deleted_workflows
+
+    def remove_workflow_deletion_marker(self, workflow_id: str) -> None:
+        """Remove a deletion marker (for testing or undo)."""
+        self._deleted_workflows.discard(workflow_id)
+        self._deletion_audit.pop(workflow_id, None)
+
+    def get_deletion_audit(self) -> Dict[str, float]:
+        """Return deletion audit log (workflow_id -> timestamp)."""
+        return dict(self._deletion_audit)
+
+    def get_deleted_workflows(self) -> set:
+        """Return set of deleted workflow IDs."""
+        return set(self._deleted_workflows)
 
     def fail(self, task_id: str, queue: str = "default") -> bool:
         task = self._in_flight.pop(task_id, None)

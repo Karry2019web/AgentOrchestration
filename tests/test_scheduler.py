@@ -153,3 +153,58 @@ class TestTaskScheduler:
 # 2026-01-12T16:53:28 update
 
 # 2026-04-16T16:58:23 update
+    def test_mark_workflow_deleted_rejects_enqueue(self):
+        """Regression: enqueuing a task for a deleted workflow raises."""
+        self.scheduler.mark_workflow_deleted("wf-1")
+        with pytest.raises(ValueError, match="deleted workflow"):
+            self.scheduler.enqueue({"type": "test", "workflow_id": "wf-1"})
+
+    def test_mark_workflow_deleted_rejects_schedule(self):
+        """Regression: scheduling a task for a deleted workflow raises."""
+        self.scheduler.mark_workflow_deleted("wf-2")
+        with pytest.raises(ValueError, match="deleted workflow"):
+            self.scheduler.schedule({"type": "test", "workflow_id": "wf-2"}, delay=0.1)
+
+    def test_enqueue_allowed_for_live_workflow(self):
+        """A live (non-deleted) workflow can still enqueue tasks."""
+        task_id = self.scheduler.enqueue(
+            {"type": "test", "workflow_id": "wf-live"}
+        )
+        assert task_id is not None
+        import asyncio
+        task = asyncio.run(self.scheduler.dequeue())
+        assert task["workflow_id"] == "wf-live"
+
+    def test_mark_workflow_deleted_audit_logged(self):
+        """Deletion audit records the deletion timestamp."""
+        self.scheduler.mark_workflow_deleted("wf-audit")
+        audit = self.scheduler.get_deletion_audit()
+        assert "wf-audit" in audit
+        assert isinstance(audit["wf-audit"], float)
+
+    def test_remove_deletion_marker(self):
+        """Removing a deletion marker re-allows enqueue for that workflow."""
+        self.scheduler.mark_workflow_deleted("wf-temp")
+        assert "wf-temp" in self.scheduler.get_deleted_workflows()
+        self.scheduler.remove_workflow_deletion_marker("wf-temp")
+        assert "wf-temp" not in self.scheduler.get_deleted_workflows()
+        task_id = self.scheduler.enqueue(
+            {"type": "test", "workflow_id": "wf-temp"}
+        )
+        assert task_id is not None
+
+    def test_enqueue_without_workflow_id_still_works(self):
+        """Tasks without a workflow_id are not blocked."""
+        task_id = self.scheduler.enqueue({"type": "test"})
+        assert task_id is not None
+        import asyncio
+        task = asyncio.run(self.scheduler.dequeue())
+        assert task["type"] == "test"
+
+    def test_deleted_workflow_isolation(self):
+        """Deleting one workflow does not affect other workflows."""
+        self.scheduler.mark_workflow_deleted("wf-deleted")
+        task_id = self.scheduler.enqueue(
+            {"type": "test", "workflow_id": "wf-other"}
+        )
+        assert task_id is not None

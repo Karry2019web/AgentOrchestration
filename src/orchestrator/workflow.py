@@ -1,5 +1,6 @@
 """Workflow Manager — Defines and executes multi-step agent workflows."""
 
+import logging
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
@@ -43,9 +44,17 @@ class Workflow:
         return self._step_map.get(step_id)
 
 
+logger = logging.getLogger(__name__)
+
+
 class WorkflowManager:
     def __init__(self):
         self._workflows: Dict[str, Workflow] = {}
+        self._scheduler = None
+
+    def set_scheduler(self, scheduler) -> None:
+        """Link the scheduler for deletion enforcement."""
+        self._scheduler = scheduler
 
     def create_workflow(self, name: str, description: str = "") -> Workflow:
         workflow = Workflow(name, description)
@@ -59,7 +68,14 @@ class WorkflowManager:
         return list(self._workflows.values())
 
     def delete_workflow(self, workflow_id: str) -> bool:
-        return self._workflows.pop(workflow_id, None) is not None
+        removed = self._workflows.pop(workflow_id, None) is not None
+        if removed and self._scheduler is not None:
+            self._scheduler.mark_workflow_deleted(workflow_id)
+            logger.info(
+                "Workflow %s deleted and marked for run prevention",
+                workflow_id,
+            )
+        return removed
 
     def execute_workflow(self, workflow_id: str) -> bool:
         workflow = self._workflows.get(workflow_id)
