@@ -1,7 +1,7 @@
 """Workflow Manager — Defines and executes multi-step agent workflows."""
 
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 from uuid import uuid4
 
 
@@ -14,12 +14,13 @@ class StepStatus(Enum):
 
 
 class WorkflowStep:
-    def __init__(self, name: str, handler: Callable, retries: int = 0, timeout: int = 300):
+    def __init__(self, name: str, handler: Callable, retries: int = 0, timeout: int = 300, dependencies: Optional[List[str]] = None):
         self.id = str(uuid4())
         self.name = name
         self.handler = handler
         self.retries = retries
         self.timeout = timeout
+        self.dependencies = dependencies or []
         self.status = StepStatus.PENDING
         self.result: Any = None
         self.error: Optional[str] = None
@@ -61,24 +62,124 @@ class WorkflowManager:
     def delete_workflow(self, workflow_id: str) -> bool:
         return self._workflows.pop(workflow_id, None) is not None
 
+    def _validate_workflow_graph(self, workflow: Workflow) -> None:
+        """Validate the workflow dependency graph before execution.
+        
+        Checks:
+        1. All dependency references point to existing steps.
+        2. No circular dependencies exist.
+        3. Fan-in joins are valid (steps with dependencies only run after dependents).
+        
+        Raises ValueError if validation fails.
+        """
+        step_ids = set(workflow._step_map.keys())
+        
+        # Check all dependency references exist
+        for step in workflow.steps:
+            for dep_id in step.dependencies:
+                if dep_id not in step_ids:
+                    raise ValueError(
+                        f"Step '{step.name}' depends on unknown step ID '{dep_id}'"
+                    )
+        
+        # Check for circular dependencies via DFS
+        visited: Set[str] = set()
+        path: Set[str] = set()
+        
+        def _detect_cycle(step_id: str) -> None:
+            if step_id in path:
+                cycle_step = workflow._step_map[step_id]
+                raise ValueError(
+                    f"Circular dependency detected involving step '{cycle_step.name}'"
+                )
+            if step_id in visited:
+                return
+            path.add(step_id)
+            visited.add(step_id)
+            step = workflow._step_map[step_id]
+            for dep_id in step.dependencies:
+                if dep_id in workflow._step_map:
+                    _detect_cycle(dep_id)
+            path.remove(step_id)
+        
+        for step in workflow.steps:
+            if step.id not in visited:
+                _detect_cycle(step.id)
+
     def execute_workflow(self, workflow_id: str) -> bool:
         workflow = self._workflows.get(workflow_id)
         if not workflow:
             return False
 
+        # Validate graph before execution
+        try:
+            self._validate_workflow_graph(workflow)
+        except ValueError:
+            return False
+
         workflow.status = StepStatus.RUNNING
-        for step in workflow.steps:
-            step.status = StepStatus.RUNNING
-            try:
-                result = step.handler()
-                step.result = result
-                step.status = StepStatus.COMPLETED
-            except Exception as e:
-                step.error = str(e)
-                step.status = StepStatus.FAILED
+        
+        # Track dependency failure status for fan-in joins
+        dep_failures: Dict[str, str] = {}  # step_id -> error message
+        completed_steps: Set[str] = set()
+        
+        # Build an execution order respecting dependencies
+        # Steps without dependencies run first, then steps whose dependencies are all resolved
+        remaining = {step.id: step for step in workflow.steps}
+        
+        while remaining:
+            ready = [
+                step for step in remaining.values()
+                if all(dep_id in completed_steps for dep_id in step.dependencies)
+            ]
+            if not ready:
+                # Deadlock or unreachable steps - mark failed
+                for step in remaining.values():
+                    step.status = StepStatus.FAILED
+                    step.error = "Unreachable: dependency graph deadlock"
                 workflow.status = StepStatus.FAILED
                 return False
-
+            
+            for step in ready:
+                # Check if any dependency failed - preserve failure status
+                failed_deps = [
+                    dep_id for dep_id in step.dependencies 
+                    if dep_id in dep_failures
+                ]
+                if failed_deps:
+                    # Fan-in join: preserve dependency failure
+                    step.status = StepStatus.FAILED
+                    failed_names = [
+                        workflow._step_map[dep_id].name 
+                        for dep_id in failed_deps 
+                        if dep_id in workflow._step_map
+                    ]
+                    step.error = (
+                        f"Skipped due to dependency failure(s): {', '.join(failed_names)}. "
+                        f"Original errors: {'; '.join(dep_failures[dep_id] for dep_id in failed_deps)}"
+                    )
+                    dep_failures[step.id] = step.error
+                    del remaining[step.id]
+                    continue
+                
+                step.status = StepStatus.RUNNING
+                try:
+                    result = step.handler()
+                    step.result = result
+                    step.status = StepStatus.COMPLETED
+                    completed_steps.add(step.id)
+                except Exception as e:
+                    step.error = str(e)
+                    step.status = StepStatus.FAILED
+                    dep_failures[step.id] = str(e)
+                    workflow.status = StepStatus.FAILED
+                finally:
+                    del remaining[step.id]
+        
+        if dep_failures:
+            workflow.status = StepStatus.FAILED
+            return False
+            
         workflow.status = StepStatus.COMPLETED
         return True
 
@@ -193,3 +294,4 @@ class WorkflowManager:
 # 2026-01-27T13:23:38 update
 
 # 2026-01-28T11:22:50 update
+
