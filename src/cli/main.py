@@ -7,7 +7,8 @@ from src.common.config import Config
 from src.common.logging import configure_logging
 
 
-def cli():
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser. Extracted for test isolation."""
     parser = argparse.ArgumentParser(description="Agent Orchestrator CLI")
     parser.add_argument("--config", "-c", help="Path to config file")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
@@ -27,12 +28,19 @@ def cli():
     logs_parser.add_argument("agent_id", help="Agent ID")
     logs_parser.add_argument("--tail", "-t", type=int, default=50, help="Number of lines")
 
+    return parser
+
+
+def cli(client_factory=None):
+    parser = build_parser()
     args = parser.parse_args()
 
     if args.verbose:
         configure_logging("DEBUG")
     else:
         configure_logging("INFO")
+
+    client = client_factory() if client_factory else None
 
     if args.command == "init":
         print(f"Initializing project: {args.name}")
