@@ -1,13 +1,73 @@
 """API middleware components."""
 
 import time
+import uuid
 import logging
-from typing import Callable
+from typing import Callable, Optional
+from contextvars import ContextVar
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
+
+# Context vars for request-scoped state (prevent leaking across tenants)
+_request_id: ContextVar[str] = ContextVar("request_id", default="")
+_tenant_id: ContextVar[str] = ContextVar("tenant_id", default="")
+_user_id: ContextVar[str] = ContextVar("user_id", default="")
+
+
+def get_request_id() -> str:
+    """Get the current request correlation ID."""
+    return _request_id.get()
+
+
+def get_tenant_id() -> str:
+    """Get the current tenant/workspace ID."""
+    return _tenant_id.get()
+
+
+def get_user_id() -> str:
+    """Get the current user ID."""
+    return _user_id.get()
+
+
+class RequestContextMiddleware(BaseHTTPMiddleware):
+    """Assigns and tracks request-scoped context (correlation ID, tenant, user).
+
+    Ensures correlation IDs, tenant IDs, and user IDs never leak across
+    requests or tenants by using ContextVars and clearing state in finally blocks.
+    """
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # Generate unique correlation ID for this request
+        correlation_id = request.headers.get("X-Correlation-ID", str(uuid.uuid4()))
+
+        # Extract tenant and user from auth headers or defaults
+        tenant_id = request.headers.get("X-Tenant-ID", "default")
+        user_id = request.headers.get("X-User-ID", "anonymous")
+
+        # Set context vars
+        token_request = _request_id.set(correlation_id)
+        token_tenant = _tenant_id.set(tenant_id)
+        token_user = _user_id.set(user_id)
+
+        # Set correlation ID on request state for downstream handlers
+        request.state.request_id = correlation_id
+        request.state.tenant_id = tenant_id
+        request.state.user_id = user_id
+
+        try:
+            response = await call_next(request)
+            # Tag response with correlation ID for tracing
+            response.headers["X-Request-ID"] = correlation_id
+            response.headers["X-Tenant-ID"] = tenant_id
+            return response
+        finally:
+            # CRITICAL: Reset context vars to prevent state leaking across requests
+            _request_id.reset(token_request)
+            _tenant_id.reset(token_tenant)
+            _user_id.reset(token_user)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -45,9 +105,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         start = time.time()
+        request_id = get_request_id() or request.headers.get("X-Correlation-ID", "none")
         response = await call_next(request)
         duration = time.time() - start
-        logger.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s")
+        logger.info(
+            f"[{request_id}] {request.method} {request.url.path} "
+            f"{response.status_code} {duration:.3f}s"
+        )
         return response
 
 # 2019-03-01T18:35:19 update
