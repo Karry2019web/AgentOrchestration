@@ -54,6 +54,40 @@ async def stop_agent(agent_id: str):
 async def agent_count():
     return {"count": registry.count()}
 
+@router.get("/agents/{agent_id}/events")
+async def get_agent_events(agent_id: str, limit: int = 50, offset: int = 0):
+    """Get run events for an agent with capped pagination."""
+    MAX_PAGE_SIZE = 100
+    if limit > MAX_PAGE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pagination limit exceeds maximum allowed value of {MAX_PAGE_SIZE}"
+        )
+    if limit < 1:
+        raise HTTPException(status_code=400, detail="Pagination limit must be at least 1")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="Offset must be non-negative")
+
+    agent = registry.get(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    events = _get_run_events(agent_id)
+    capped = events[offset:offset + limit]
+    return {
+        "agent_id": agent_id,
+        "events": capped,
+        "total": len(events),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+def _get_run_events(agent_id: str) -> list:
+    """Retrieve run events for the given agent — service layer with bounds."""
+    return registry.get_events(agent_id) if hasattr(registry, 'get_events') else []
+
+
 # 2019-03-18T11:10:18 update
 
 # 2019-04-22T13:58:05 update

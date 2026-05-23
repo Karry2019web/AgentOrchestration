@@ -73,6 +73,22 @@ class AgentRegistry:
     def count(self) -> int:
         return len(self._agents)
 
+    def get_events(self, agent_id: str) -> list:
+        """Get run events for an agent. Returns an empty list if none stored."""
+        agent = self._agents.get(agent_id)
+        if not agent:
+            return []
+        return agent.get("events", [])
+
+    def add_event(self, agent_id: str, event: dict) -> None:
+        """Record a run event for an agent."""
+        if agent_id not in self._agents:
+            return
+        if "events" not in self._agents[agent_id]:
+            self._agents[agent_id]["events"] = []
+        self._agents[agent_id]["events"].append(event)
+
+
 # 2019-01-29T11:24:49 update
 
 # 2019-04-09T13:38:38 update
