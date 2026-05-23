@@ -2,8 +2,39 @@
 
 import os
 import tempfile
-import resource
+import sys
 from typing import Dict, Optional
+from pathlib import Path
+
+try:
+    import resource
+except ModuleNotFoundError:
+    # Windows stub — resource is Unix-only
+    import threading
+    class resource:
+        @staticmethod
+        def getrusage(who):
+            return type('rusage', (), {'ru_utime': 0.0, 'ru_stime': 0.0})()
+        RLIMIT_CPU = 0
+        RLIMIT_AS = 1
+        RLIMIT_FSIZE = 2
+        RLIMIT_NOFILE = 3
+        RLIMIT_NPROC = 4
+
+        @staticmethod
+        def setrlimit(resource, limits):
+            pass
+
+        @staticmethod
+        def getrlimit(resource):
+            return (float("inf"), float("inf"))
+
+    RLIMIT_CPU = 0
+    RLIMIT_AS = 1
+    RLIMIT_FSIZE = 2
+    RLIMIT_NPROC = 4
+    RLIMIT_NOFILE = 3
+
 from pathlib import Path
 
 

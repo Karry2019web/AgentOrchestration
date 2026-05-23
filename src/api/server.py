@@ -18,6 +18,7 @@ def create_app(config: Dict = None) -> FastAPI:
         description="Enterprise Agent Orchestration Platform API",
         docs_url="/api/docs",
         redoc_url="/api/redoc",
+        redirect_slashes=False,
     )
 
     app.add_middleware(
