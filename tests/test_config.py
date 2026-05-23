@@ -135,3 +135,32 @@ class TestConfig:
 # 2026-02-11T19:28:37 update
 
 # 2026-04-17T10:00:53 update
+
+
+class TestEnvOverrideUnderscores:
+    def test_single_underscore_becomes_dot(self):
+        """AO_API_URL should map to api.url (backward compatible)."""
+        import os
+        os.environ["AO_API_URL"] = "http://test"
+        config = Config()
+        val = config.get("api.url")
+        assert val == "http://test", f"Expected http://test, got {val}"
+        del os.environ["AO_API_URL"]
+
+    def test_double_underscore_becomes_literal(self):
+        """AO_API__URL should map to api_url (literal underscore)."""
+        import os
+        os.environ["AO_API__URL"] = "http://literal"
+        config = Config()
+        val = config.get("api_url")
+        assert val == "http://literal", f"Expected http://literal, got {val}"
+        del os.environ["AO_API__URL"]
+
+    def test_mixed_underscores(self):
+        """AO_DB__CONNECTION_STRING should map to db_connection.string."""
+        import os
+        os.environ["AO_DB__CONNECTION_STRING"] = "localhost"
+        config = Config()
+        val = config.get("db_connection.string")
+        assert val == "localhost", f"Expected localhost, got {val}"
+        del os.environ["AO_DB__CONNECTION_STRING"]
