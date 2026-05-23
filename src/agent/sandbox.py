@@ -1,10 +1,11 @@
 """Agent Sandbox — Isolated execution environment for agents."""
 
 import os
+import shutil
 import tempfile
 import resource
-from typing import Dict, Optional
 from pathlib import Path
+from typing import Dict, Optional
 
 
 class ResourceLimits:
@@ -28,7 +29,6 @@ class AgentSandbox:
     def destroy(self, agent_id: str) -> bool:
         sandbox = self._sandboxes.pop(agent_id, None)
         if sandbox and sandbox.exists():
-            import shutil
             shutil.rmtree(sandbox, ignore_errors=True)
             return True
         return False
@@ -41,8 +41,32 @@ class AgentSandbox:
             resource.setrlimit(resource.RLIMIT_CPU, (limits.cpu_time, limits.cpu_time))
             mem_bytes = limits.memory_mb * 1024 * 1024
             resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+            # Enforce disk_mb via total file size written (per-process)
+            disk_bytes = limits.disk_mb * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_FSIZE, (disk_bytes, disk_bytes))
         except (ValueError, resource.error) as e:
             pass
+
+    def get_disk_usage(self, agent_id: str) -> int:
+        """Return total bytes used by the agent's sandbox directory."""
+        sandbox_path = self._sandboxes.get(agent_id)
+        if not sandbox_path or not sandbox_path.exists():
+            return 0
+        total = 0
+        for dirpath, dirnames, filenames in os.walk(sandbox_path):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                try:
+                    total += os.path.getsize(fp)
+                except OSError:
+                    pass
+        return total
+
+    def is_disk_over_quota(self, agent_id: str, limits: ResourceLimits) -> bool:
+        """Check if the agent's sandbox exceeds its disk quota."""
+        usage = self.get_disk_usage(agent_id)
+        quota = limits.disk_mb * 1024 * 1024
+        return usage > quota
 
     def cleanup_all(self) -> None:
         for agent_id in list(self._sandboxes.keys()):
@@ -187,3 +211,5 @@ class AgentSandbox:
 # 2026-03-10T10:16:37 update
 
 # 2026-05-18T12:52:56 update
+
+# 2026-05-23T23:36:18 update
