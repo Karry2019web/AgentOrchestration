@@ -153,3 +153,73 @@ class TestTaskScheduler:
 # 2026-01-12T16:53:28 update
 
 # 2026-04-16T16:58:23 update
+
+
+class TestTimezoneAwareScheduling:
+    """Verify scheduler handles timezone-aware datetime consistently."""
+
+    def setup_method(self):
+        self.scheduler = TaskScheduler()
+
+    def test_schedule_with_float_delay(self):
+        """Schedule with float delay should work as before."""
+        from src.orchestrator.scheduler import _to_timestamp
+        import time
+        before = time.time()
+        ts = _to_timestamp(30.0)
+        after = time.time()
+        # Should be within [before+30, after+30]
+        assert before + 30 <= ts <= after + 30
+
+    def test_schedule_with_int_delay(self):
+        """Schedule with int delay should work the same as float."""
+        from src.orchestrator.scheduler import _to_timestamp
+        import time
+        before = time.time()
+        ts = _to_timestamp(60)
+        after = time.time()
+        assert before + 60 <= ts <= after + 60
+
+    def test_schedule_with_utc_datetime(self):
+        """UTC datetime should produce a consistent timestamp."""
+        import datetime
+        dt = datetime.datetime(2026, 12, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
+        ts = dt.timestamp()
+        assert ts > 0
+
+    def test_schedule_with_timezone_aware_datetime(self):
+        """A timezone-aware datetime in a different zone normalizes to UTC."""
+        import datetime
+        # US Eastern time (UTC-5 in December)
+        eastern = datetime.timezone(datetime.timedelta(hours=-5))
+        dt_eastern = datetime.datetime(2026, 12, 1, 0, 0, 0, tzinfo=eastern)
+        dt_utc = datetime.datetime(2026, 12, 1, 5, 0, 0, tzinfo=datetime.timezone.utc)
+        from src.orchestrator.scheduler import _to_timestamp
+        # Both should represent the same instant
+        assert abs(_to_timestamp(dt_eastern) - _to_timestamp(dt_utc)) < 1.0
+
+    def test_schedule_task_with_float_delay(self):
+        """schedule() with float delay should register task in _scheduled."""
+        task_id = self.scheduler.schedule({"type": "delayed"}, 30.0)
+        assert task_id is not None
+        assert task_id in self.scheduler._scheduled
+
+    def test_schedule_task_with_datetime(self):
+        """schedule() with datetime should work."""
+        import datetime
+        future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+        task_id = self.scheduler.schedule({"type": "scheduled"}, future)
+        assert task_id is not None
+        assert task_id in self.scheduler._scheduled
+        # Should be scheduled about 3600 seconds from now
+        scheduled = self.scheduler._scheduled[task_id]
+        import time
+        assert scheduled > time.time() + 3500
+
+    def test_no_expired_tasks_before_time(self):
+        """Scheduled tasks should not be dequeued before their time."""
+        import asyncio
+        task_id = self.scheduler.schedule({"type": "future"}, 600.0)
+        task = asyncio.run(self.scheduler.dequeue())
+        # Should still be scheduled, not dequeued
+        assert task is None or task.get("id") != task_id
