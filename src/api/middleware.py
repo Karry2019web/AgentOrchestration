@@ -11,11 +11,45 @@ logger = logging.getLogger(__name__)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
+    # Scope requirements for different endpoint patterns
+    _SCOPE_MAP = {
+        "delete": "admin",
+        "stop": "operator",
+        "start": "operator",
+    }
+
+    @staticmethod
+    def _parse_scopes(token: str) -> set:
+        """Extract scopes from a Bearer token's scope claim."""
+        token_val = token.removeprefix("Bearer ").strip()
+        if not token_val:
+            return set()
+        # JWT-like scope extraction: assume payload is a simple JSON-like string
+        # For non-JWT tokens, use token type prefix as scope hint
+        if token_val.startswith("admin_"):
+            return {"admin", "operator", "readonly"}
+        elif token_val.startswith("op_"):
+            return {"operator", "readonly"}
+        elif token_val.startswith("ro_"):
+            return {"readonly"}
+        return {"readonly"}
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         if request.url.path.startswith("/api/v2") and request.url.path != "/api/v2/auth/token":
             token = request.headers.get("Authorization", "")
             if not token.startswith("Bearer "):
                 return Response(status_code=401, content="Unauthorized")
+
+            # Enforce least-privilege scopes on mutation endpoints
+            for action, required_scope in self._SCOPE_MAP.items():
+                if action in request.url.path and request.method in ("POST", "DELETE", "PUT", "PATCH"):
+                    scopes = self._parse_scopes(token)
+                    if required_scope not in scopes:
+                        return Response(
+                            status_code=403,
+                            content=f"Forbidden: {required_scope} scope required for {request.method} {request.url.path}",
+                        )
+                    break
         return await call_next(request)
 
 
