@@ -1,12 +1,23 @@
 """API route definitions."""
 
 from fastapi import APIRouter, HTTPException, Depends
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from src.agent import AgentRegistry, AgentStatus
+from src.common.queries import TraceQueryGuard, QueryFilterDepthError
 
 router = APIRouter()
 registry = AgentRegistry()
+trace_query_guard = TraceQueryGuard()
+
+# Sample trace store (in-memory for trace explorer queries)
+_trace_store: List[Dict[str, Any]] = [
+    {"trace_id": "trace-001", "agent_id": "agent-alpha", "action": "process", "status": "completed", "duration_ms": 120, "tags": {"env": "prod", "region": "us-east"}},
+    {"trace_id": "trace-002", "agent_id": "agent-beta", "action": "deploy", "status": "failed", "duration_ms": 4500, "tags": {"env": "staging", "region": "us-west"}},
+    {"trace_id": "trace-003", "agent_id": "agent-alpha", "action": "infer", "status": "completed", "duration_ms": 890, "tags": {"env": "prod", "region": "eu-west"}},
+    {"trace_id": "trace-004", "agent_id": "agent-gamma", "action": "train", "status": "running", "duration_ms": 12200, "tags": {"env": "dev", "region": "us-east"}},
+    {"trace_id": "trace-005", "agent_id": "agent-beta", "action": "rollback", "status": "completed", "duration_ms": 2400, "tags": {"env": "prod", "region": "ap-southeast"}},
+]
 
 
 @router.get("/agents")
@@ -53,6 +64,124 @@ async def stop_agent(agent_id: str):
 @router.get("/agents/count")
 async def agent_count():
     return {"count": registry.count()}
+
+
+# --- Trace Query API with nested filter depth guard ---
+
+
+@router.post("/traces/query")
+async def query_traces(filters: Optional[Dict[str, Any]] = None, limit: int = 100):
+    """Query traces with optional filter criteria.
+
+    Filters use a MongoDB-style query syntax:
+      {"agent_id": "agent-alpha", "status": "completed"}
+      {"$and": [{"duration_ms": {"$gt": 1000}}, {"status": "failed"}]}
+      {"duration_ms": {"$gte": 100, "$lte": 5000}}
+
+    The nested filter depth is guarded at 5 levels maximum.
+    """
+    if filters:
+        try:
+            trace_query_guard.validate(filters)
+        except QueryFilterDepthError as e:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "FILTER_DEPTH_EXCEEDED",
+                    "message": str(e),
+                    "depth": e.depth,
+                    "max_depth": e.max_depth,
+                }
+            )
+
+    results = _query_trace_store(filters or {}, limit=limit)
+    return {"traces": results, "count": len(results)}
+
+
+@router.get("/traces")
+async def list_traces(
+    agent_id: Optional[str] = None,
+    status: Optional[str] = None,
+    action: Optional[str] = None,
+    limit: int = 100,
+):
+    """List traces with simple query parameter filters (no nesting guard needed)."""
+    filters = {}
+    if agent_id:
+        filters["agent_id"] = agent_id
+    if status:
+        filters["status"] = status
+    if action:
+        filters["action"] = action
+
+    results = _query_trace_store(filters, limit=limit)
+    return {"traces": results, "count": len(results)}
+
+
+def _match_trace(trace: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+    """Apply MongoDB-style filters to a single trace record.
+
+    Supports:
+      - Field equality: {"agent_id": "agent-alpha"}
+      - Comparison operators: $gt, $gte, $lt, $lte, $ne, $eq
+      - Logical operators: $and, $or, $not
+      - List matching ($in, $nin)
+    """
+    for field, condition in filters.items():
+        if field == "$and":
+            if not all(_match_trace(trace, sub) for sub in condition):
+                return False
+        elif field == "$or":
+            if not any(_match_trace(trace, sub) for sub in condition):
+                return False
+        elif field == "$not":
+            if _match_trace(trace, condition):
+                return False
+        elif isinstance(condition, dict):
+            actual = _get_nested_field(trace, field)
+            for op, val in condition.items():
+                if op == "$gt" and not (actual is not None and actual > val):
+                    return False
+                elif op == "$gte" and not (actual is not None and actual >= val):
+                    return False
+                elif op == "$lt" and not (actual is not None and actual < val):
+                    return False
+                elif op == "$lte" and not (actual is not None and actual <= val):
+                    return False
+                elif op == "$ne" and not (actual is not None and actual != val):
+                    return False
+                elif op == "$eq" and actual != val:
+                    return False
+                elif op == "$in" and (actual is None or actual not in val):
+                    return False
+                elif op == "$nin" and (actual is not None and actual in val):
+                    return False
+                elif op not in ("$gt", "$gte", "$lt", "$lte", "$ne", "$eq", "$in", "$nin"):
+                    return False
+        else:
+            actual = _get_nested_field(trace, field)
+            if actual != condition:
+                return False
+    return True
+
+
+def _get_nested_field(obj: Dict[str, Any], dotted_path: str) -> Any:
+    """Access a nested field by dotted path (e.g. 'tags.env')."""
+    parts = dotted_path.split(".")
+    current = obj
+    for part in parts:
+        if isinstance(current, dict):
+            current = current.get(part)
+        else:
+            return None
+    return current
+
+
+def _query_trace_store(filters: Dict[str, Any], limit: int = 100) -> List[Dict[str, Any]]:
+    """Query the in-memory trace store with optional filters."""
+    filtered = [t for t in _trace_store if _match_trace(t, filters)]
+    return filtered[:limit]
+
 
 # 2019-03-18T11:10:18 update
 
@@ -191,3 +320,4 @@ async def agent_count():
 # 2026-04-09T20:30:37 update
 
 # 2026-05-13T11:36:25 update
+

@@ -41,6 +41,21 @@ class ResourceExhaustedError(AgentOrchestratorError):
     def __init__(self, resource: str):
         super().__init__(f"Resource exhausted: {resource}")
 
+
+class ValidationError(AgentOrchestratorError):
+    """Raised when input validation fails."""
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class QueryValidationError(ValidationError):
+    """Raised when a trace query filter fails validation."""
+    def __init__(self, message: str, detail: dict = None):
+        super().__init__(f"Query validation error: {message}", status_code=422)
+        self.detail = detail or {}
+
+
 # 2019-01-25T13:21:06 update
 
 # 2019-02-15T19:31:32 update
@@ -166,3 +181,4 @@ class ResourceExhaustedError(AgentOrchestratorError):
 # 2026-05-04T18:36:18 update
 
 # 2026-05-11T11:46:37 update
+
