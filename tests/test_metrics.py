@@ -136,3 +136,34 @@ class TestMetricsCollector:
 # 2026-03-24T19:28:19 update
 
 # 2026-04-10T18:10:10 update
+
+
+class TestHistogramMinMax:
+    def test_min_max_in_snapshot(self):
+        """Histogram snapshot should include min and max."""
+        metrics = MetricsCollector()
+        metrics.observe("test.latency", 10)
+        metrics.observe("test.latency", 20)
+        metrics.observe("test.latency", 5)
+        metrics.observe("test.latency", 15)
+        snapshot = metrics.snapshot()
+        hist = snapshot["histograms"]["test.latency"]
+        assert hist["min"] == 5
+        assert hist["max"] == 20
+        assert hist["count"] == 4
+        assert hist["sum"] == 50
+
+    def test_min_max_single_observation(self):
+        """Single observation should have min == max."""
+        metrics = MetricsCollector()
+        metrics.observe("test.latency", 42)
+        snapshot = metrics.snapshot()
+        hist = snapshot["histograms"]["test.latency"]
+        assert hist["min"] == 42
+        assert hist["max"] == 42
+
+    def test_empty_histogram(self):
+        """Empty histogram should have no min/max."""
+        metrics = MetricsCollector()
+        snapshot = metrics.snapshot()
+        assert snapshot["histograms"] == {}
