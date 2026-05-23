@@ -1,0 +1,122 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (skip actual publish)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+# Enforce read-all at workflow level (least privilege)
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  validate-ref:
+    runs-on: ubuntu-latest
+    outputs:
+      is_protected: ${{ steps.protection-check.outputs.is_protected }}
+    steps:
+      - name: Check source ref
+        id: protection-check
+        run: |
+          REF="${{ github.ref }}"
+          EVENT_NAME="${{ github.event_name }}"
+
+          echo "Ref: $REF"
+          echo "Event: $EVENT_NAME"
+
+          if [ "$EVENT_NAME" = "release" ]; then
+            # Release events always come from a published release — they are
+            # triggered by GitHub itself after a release is created from a
+            # protected branch or signed tag.
+            echo "is_protected=true" >> "$GITHUB_OUTPUT"
+            echo "Release event accepted (originates from release creation)"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Workflow dispatch must come from a protected branch.
+            # Manual dispatch inputs CANNOT override this check.
+            if [ "$REF" = "refs/heads/main" ] || [ "$REF" = "refs/heads/develop" ]; then
+              echo "is_protected=true" >> "$GITHUB_OUTPUT"
+              echo "Protected branch: $REF"
+            else
+              echo "is_protected=false" >> "$GITHUB_OUTPUT"
+              echo "UNPROTECTED REF: $REF — publishing rejected."
+              exit 1
+            fi
+          else
+            echo "is_protected=false" >> "$GITHUB_OUTPUT"
+            echo "Unknown event $EVENT_NAME — publishing rejected."
+            exit 1
+          fi
+
+  build:
+    needs: [validate-ref]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Lint
+        run: uv run flake8 src/ tests/
+
+      - name: Run tests
+        run: uv run pytest --cov=src tests/
+
+      - name: Build package
+        run: uv build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.python-version }}
+          path: dist/
+
+  publish:
+    needs: [validate-ref, build]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    if: ${{ needs.validate-ref.outputs.is_protected == 'true' && !(github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true') }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-3.11
+          path: dist/
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          verbose: true
