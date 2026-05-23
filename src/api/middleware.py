@@ -11,14 +11,17 @@ logger = logging.getLogger(__name__)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, public_paths=None):
+        super().__init__(app)
+        self.public_paths = {"/api/v2/auth/token"} if public_paths is None else set(public_paths)
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if request.url.path.startswith("/api/v2") and request.url.path != "/api/v2/auth/token":
+        path = request.url.path.rstrip("/") or "/"
+        if path.startswith("/api/v2") and path not in self.public_paths:
             token = request.headers.get("Authorization", "")
             if not token.startswith("Bearer "):
                 return Response(status_code=401, content="Unauthorized")
         return await call_next(request)
-
-
 class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, max_requests: int = 100, window: int = 60):
         super().__init__(app)
