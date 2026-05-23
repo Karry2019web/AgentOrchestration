@@ -15,6 +15,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -23,6 +25,8 @@ jobs:
         uses: astral-sh/setup-uv@v3
       - name: Install dependencies
         run: uv sync
+      - name: Check workspace package drift
+        run: uv run python scripts/check-package-drift.py --base-ref main
       - name: Run tests
         run: uv run pytest --cov=src tests/
       - name: Lint
