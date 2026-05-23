@@ -6,7 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Restrict write permissions — PR validation only needs read access
+permissions: read-all
+
 jobs:
+  # ---- Validation jobs (read-only, run on every PR/push) ----
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -27,3 +31,26 @@ jobs:
         run: uv run pytest --cov=src tests/
       - name: Lint
         run: uv run flake8 src/ tests/
+
+  # ---- Check that no workflow in the repo uses broad default permissions ----
+  permissions-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check workflow permissions
+        shell: bash
+        run: |
+          errors=0
+          for f in .github/workflows/*.yml; do
+            [ -f "$f" ] || continue
+            [ "$f" = ".github/workflows/ci.yml" ] && continue
+            if grep -q 'permissions:' "$f" 2>/dev/null; then
+              if grep -qE 'permissions:\s*write-all' "$f"; then
+                echo "ERROR: $f uses write-all permissions — use narrow scopes instead"
+                errors=$((errors+1))
+              fi
+            else
+              echo "WARNING: $f has no explicit permissions block"
+            fi
+          done
+          exit $errors
