@@ -1,7 +1,8 @@
 """Workflow Manager — Defines and executes multi-step agent workflows."""
 
+from collections import defaultdict, deque
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 from uuid import uuid4
 
 
@@ -10,6 +11,7 @@ class StepStatus(Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    FAILED_DEPENDENCY = "failed_dependency"
     SKIPPED = "skipped"
 
 
@@ -33,14 +35,80 @@ class Workflow:
         self.steps: List[WorkflowStep] = []
         self._step_map: Dict[str, WorkflowStep] = {}
         self.status = StepStatus.PENDING
+        self._dependencies: Dict[str, Set[str]] = {}
 
-    def add_step(self, step: WorkflowStep) -> "Workflow":
+    def add_step(self, step: WorkflowStep, depends_on: Optional[List[str]] = None) -> "Workflow":
         self.steps.append(step)
         self._step_map[step.id] = step
+        if depends_on:
+            resolved = set()
+            for dep in depends_on:
+                found = None
+                for s in self.steps:
+                    if s.name == dep or s.id == dep:
+                        found = s
+                        break
+                if found:
+                    resolved.add(found.id)
+            if resolved:
+                self._dependencies[step.id] = resolved
         return self
 
     def get_step(self, step_id: str) -> Optional[WorkflowStep]:
         return self._step_map.get(step_id)
+
+    def get_dependencies(self, step_id: str) -> Set[str]:
+        return self._dependencies.get(step_id, set())
+
+    def _topological_order(self) -> List[WorkflowStep]:
+        in_degree: Dict[str, int] = {}
+        graph: Dict[str, List[str]] = defaultdict(list)
+
+        for step in self.steps:
+            in_degree[step.id] = 0
+
+        for step_id, deps in self._dependencies.items():
+            for dep_id in deps:
+                graph.setdefault(dep_id, [])
+                graph[dep_id].append(step_id)
+                in_degree[step_id] = in_degree.get(step_id, 0) + 1
+
+        queue = deque()
+        for step in self.steps:
+            if in_degree.get(step.id, 0) == 0:
+                queue.append(step)
+
+        ordered = []
+        while queue:
+            step = queue.popleft()
+            ordered.append(step)
+            for next_id in graph.get(step.id, []):
+                in_degree[next_id] -= 1
+                if in_degree[next_id] == 0:
+                    next_step = self._step_map.get(next_id)
+                    if next_step:
+                        queue.append(next_step)
+
+        if len(ordered) != len(self.steps):
+            cycle_steps = [s for s in self.steps if s not in ordered]
+            for step in cycle_steps:
+                step.error = f"Cycle detected: step '{step.name}' is part of a dependency cycle"
+                step.status = StepStatus.FAILED
+            ordered.extend(cycle_steps)
+
+        return ordered
+
+    def _check_fan_in_failure(self, step: WorkflowStep) -> bool:
+        for dep_id in self._dependencies.get(step.id, set()):
+            dep_step = self._step_map.get(dep_id)
+            if dep_step and dep_step.status in (StepStatus.FAILED, StepStatus.FAILED_DEPENDENCY):
+                step.status = StepStatus.FAILED_DEPENDENCY
+                step.error = (
+                    f"Dependency step '{dep_step.name}' failed with status "
+                    f"'{dep_step.status.value}': {dep_step.error}"
+                )
+                return True
+        return False
 
 
 class WorkflowManager:
@@ -67,7 +135,12 @@ class WorkflowManager:
             return False
 
         workflow.status = StepStatus.RUNNING
-        for step in workflow.steps:
+
+        ordered_steps = workflow._topological_order()
+        for step in ordered_steps:
+            if workflow._check_fan_in_failure(step):
+                continue
+
             step.status = StepStatus.RUNNING
             try:
                 result = step.handler()
@@ -76,120 +149,10 @@ class WorkflowManager:
             except Exception as e:
                 step.error = str(e)
                 step.status = StepStatus.FAILED
-                workflow.status = StepStatus.FAILED
-                return False
 
-        workflow.status = StepStatus.COMPLETED
-        return True
-
-# 2019-03-27T19:58:07 update
-
-# 2019-05-09T09:42:56 update
-
-# 2019-12-03T10:07:42 update
-
-# 2020-01-16T18:43:28 update
-
-# 2020-03-20T10:40:15 update
-
-# 2020-04-17T15:36:50 update
-
-# 2020-05-04T14:44:01 update
-
-# 2020-06-16T13:17:31 update
-
-# 2020-08-05T17:00:24 update
-
-# 2020-09-04T08:29:23 update
-
-# 2020-09-09T17:52:02 update
-
-# 2020-10-23T10:57:44 update
-
-# 2020-12-05T20:55:47 update
-
-# 2021-01-15T19:23:40 update
-
-# 2021-02-03T20:43:12 update
-
-# 2021-03-16T12:26:47 update
-
-# 2021-04-20T14:33:28 update
-
-# 2021-10-14T15:03:32 update
-
-# 2021-10-21T17:24:55 update
-
-# 2021-11-16T17:01:08 update
-
-# 2021-11-22T09:51:21 update
-
-# 2021-12-21T16:15:47 update
-
-# 2022-03-23T16:52:27 update
-
-# 2022-12-21T09:25:50 update
-
-# 2023-01-09T09:55:25 update
-
-# 2023-01-13T11:06:15 update
-
-# 2023-01-26T11:00:59 update
-
-# 2023-02-23T08:56:54 update
-
-# 2023-05-17T08:07:16 update
-
-# 2023-06-06T17:09:34 update
-
-# 2023-06-13T10:35:28 update
-
-# 2023-08-24T20:36:06 update
-
-# 2023-10-30T19:10:13 update
-
-# 2024-01-02T08:27:25 update
-
-# 2024-01-24T12:13:15 update
-
-# 2024-02-08T13:35:49 update
-
-# 2024-05-07T16:09:24 update
-
-# 2024-05-11T09:48:46 update
-
-# 2024-05-21T19:25:41 update
-
-# 2024-06-05T12:00:30 update
-
-# 2024-06-25T09:40:26 update
-
-# 2024-09-17T13:49:39 update
-
-# 2024-10-14T17:39:35 update
-
-# 2024-11-27T20:14:35 update
-
-# 2024-12-25T19:31:41 update
-
-# 2025-01-16T13:15:09 update
-
-# 2025-02-05T14:06:59 update
-
-# 2025-02-17T20:55:11 update
-
-# 2025-04-30T19:36:53 update
-
-# 2025-07-17T10:14:40 update
-
-# 2025-08-29T12:13:15 update
-
-# 2025-09-03T13:51:11 update
-
-# 2025-09-19T16:08:24 update
-
-# 2025-11-27T08:38:12 update
-
-# 2026-01-27T13:23:38 update
-
-# 2026-01-28T11:22:50 update
+        statuses = {s.status for s in workflow.steps}
+        if StepStatus.FAILED in statuses or StepStatus.FAILED_DEPENDENCY in statuses:
+            workflow.status = StepStatus.FAILED
+        else:
+            workflow.status = StepStatus.COMPLETED
+        return workflow.status == StepStatus.COMPLETED
