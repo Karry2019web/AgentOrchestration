@@ -135,3 +135,13 @@ class TestConfig:
 # 2026-02-11T19:28:37 update
 
 # 2026-04-17T10:00:53 update
+
+    def test_parse_error_reports_path(self, tmp_path):
+        """JSONDecodeError should include the config file path."""
+        config_file = tmp_path / "bad_config.json"
+        config_file.write_text("{invalid: json}")
+        config = Config()
+        import json as _json
+        with pytest.raises(_json.JSONDecodeError) as exc_info:
+            config.load(str(config_file))
+        assert str(config_file) in str(exc_info.value)
