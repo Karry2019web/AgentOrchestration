@@ -1,5 +1,5 @@
 """Agent Executor — Handles task execution within agent sandboxes."""
-
+import contextvars
 import asyncio
 import time
 from typing import Any, Callable, Dict, Optional
@@ -12,12 +12,21 @@ class AgentExecutor:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._active_tasks: Dict[str, asyncio.Task] = {}
         self._results: Dict[str, Any] = {}
+        # Each execution gets its own isolated contextvar scope.
+        self._execution_contexts: Dict[str, contextvars.Context] = {}
 
     async def execute(self, agent_id: str, task: Dict[str, Any], handler: Callable) -> str:
         execution_id = str(uuid4())
         async with self._semaphore:
+            # Capture the current context before creating the task so that
+            # every execution starts with a clean, isolated scope.  This
+            # prevents contextvars set by an outer (parent) call from
+            # leaking into nested agent invocations.
+            ctx = contextvars.copy_context()
+            self._execution_contexts[execution_id] = ctx
             task_obj = asyncio.create_task(
-                self._run_execution(execution_id, agent_id, task, handler)
+                self._run_execution(execution_id, agent_id, task, handler),
+                context=ctx,
             )
             self._active_tasks[execution_id] = task_obj
             try:
@@ -27,6 +36,7 @@ class AgentExecutor:
                 self._results[execution_id] = {"error": str(e)}
             finally:
                 self._active_tasks.pop(execution_id, None)
+                self._execution_contexts.pop(execution_id, None)
         return execution_id
 
     async def _run_execution(self, exec_id: str, agent_id: str, task: Dict, handler: Callable) -> Any:
@@ -51,6 +61,13 @@ class AgentExecutor:
             task.cancel()
             return True
         return False
+
+    def get_execution_context(self, execution_id: str) -> Optional[contextvars.Context]:
+        """Return the contextvar scope captured when *execution_id* was started.
+
+        Returns *None* if the execution has already finished or never existed.
+        """
+        return self._execution_contexts.get(execution_id)
 
     async def shutdown(self) -> None:
         for task in self._active_tasks.values():
