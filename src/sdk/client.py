@@ -29,6 +29,9 @@ class OrchestratorClient:
             return {"error": e.code, "message": e.reason}
 
     def register_agent(self, name: str, agent_type: str, config: Dict = None) -> Dict:
+        if not name or not name.strip():
+            raise ValueError("agent name must not be blank or whitespace-only")
+        name = name.strip()
         return self._request("POST", "/agents", {
             "name": name,
             "agent_type": agent_type,
