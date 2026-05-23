@@ -1,5 +1,6 @@
 """Metrics collection and reporting."""
 
+import math
 import time
 from collections import defaultdict
 from typing import Dict, List
@@ -19,6 +20,8 @@ class MetricsCollector:
             self._counters[metric] += value
 
     def gauge(self, metric: str, value: float) -> None:
+        if not math.isfinite(value):
+            raise ValueError(f"Gauge value for {metric!r} must be finite, got {value}")
         with self._lock:
             self._gauges[metric] = value
 
