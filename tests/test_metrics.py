@@ -24,6 +24,18 @@ class TestMetricsCollector:
         assert snapshot["histograms"]["response.time"]["count"] == 2
         assert snapshot["histograms"]["response.time"]["avg"] == 1.0
 
+    def test_reset(self):
+        self.metrics.increment("requests.total", 5)
+        self.metrics.gauge("memory.usage", 85.5)
+        self.metrics.observe("response.time", 0.5)
+        self.metrics.start_timer("op")
+        self.metrics.stop_timer("op")
+        self.metrics.reset()
+        snapshot = self.metrics.snapshot()
+        assert snapshot["counters"] == {}
+        assert snapshot["gauges"] == {}
+        assert snapshot["histograms"] == {}
+
     def test_timer(self):
         self.metrics.start_timer("operation")
         import time

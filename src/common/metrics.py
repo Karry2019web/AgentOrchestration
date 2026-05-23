@@ -14,6 +14,13 @@ class MetricsCollector:
         self._histograms: Dict[str, List[float]] = defaultdict(list)
         self._timers: Dict[str, float] = {}
 
+    def reset(self) -> None:
+        with self._lock:
+            self._counters.clear()
+            self._gauges.clear()
+            self._histograms.clear()
+            self._timers.clear()
+
     def increment(self, metric: str, value: int = 1) -> None:
         with self._lock:
             self._counters[metric] += value
