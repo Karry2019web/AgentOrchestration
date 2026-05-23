@@ -136,3 +136,25 @@ class TestMetricsCollector:
 # 2026-03-24T19:28:19 update
 
 # 2026-04-10T18:10:10 update
+
+
+class TestHistogramValidation:
+    def test_rejects_non_numeric(self):
+        """Non-numeric observations should raise TypeError."""
+        metrics = MetricsCollector()
+        with pytest.raises(TypeError, match="numeric"):
+            metrics.observe("test.latency", None)
+        with pytest.raises(TypeError, match="numeric"):
+            metrics.observe("test.latency", "string_val")
+        with pytest.raises(TypeError, match="numeric"):
+            metrics.observe("test.latency", [1, 2, 3])
+
+    def test_accepts_numeric(self):
+        """Numeric observations should be accepted."""
+        metrics = MetricsCollector()
+        metrics.observe("test.latency", 42)
+        metrics.observe("test.latency", 3.14)
+        metrics.observe("test.latency", 0)
+        snapshot = metrics.snapshot()
+        assert snapshot["histograms"]["test.latency"]["count"] == 3
+        assert snapshot["histograms"]["test.latency"]["sum"] == 45.14
