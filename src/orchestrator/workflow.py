@@ -4,6 +4,8 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
+from src.common.retention import CascadeDeletion
+
 
 class StepStatus(Enum):
     PENDING = "pending"
@@ -46,6 +48,11 @@ class Workflow:
 class WorkflowManager:
     def __init__(self):
         self._workflows: Dict[str, Workflow] = {}
+        self._cascade = CascadeDeletion()
+
+    @property
+    def cascade_deletion(self) -> CascadeDeletion:
+        return self._cascade
 
     def create_workflow(self, name: str, description: str = "") -> Workflow:
         workflow = Workflow(name, description)
@@ -81,6 +88,31 @@ class WorkflowManager:
 
         workflow.status = StepStatus.COMPLETED
         return True
+
+    def cascade_delete_artifact(
+        self,
+        artifact_id: str,
+        data_class: str,
+        primary_stores: List[str],
+        derived_stores: Optional[List[str]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Delete an artifact and cascade deletion to all derived stores."""
+        return self._cascade.cascade_delete(
+            artifact_id=artifact_id,
+            data_class=data_class,
+            primary_stores=primary_stores,
+            derived_stores=derived_stores or [],
+            context=context,
+        )
+
+    def register_deletion_handler(self, store_id: str, handler: Callable) -> None:
+        """Register a handler for a specific data store."""
+        self._cascade.register_handler(store_id, handler)
+
+    def reconcile_derived_stores(self) -> List[Dict[str, Any]]:
+        """Scan for stale derived records and return them."""
+        return self._cascade.reconciliation_scan()
 
 # 2019-03-27T19:58:07 update
 
@@ -193,3 +225,4 @@ class WorkflowManager:
 # 2026-01-27T13:23:38 update
 
 # 2026-01-28T11:22:50 update
+
