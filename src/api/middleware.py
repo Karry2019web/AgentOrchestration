@@ -1,21 +1,128 @@
-"""API middleware components."""
+"""API middleware components — auth scheme case-insensitive validation."""
 
 import time
+import re
+import hashlib
 import logging
-from typing import Callable
+from typing import Callable, Optional
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 
+# RFC 7235 § 2.1: auth schemes are case-insensitive.
+_BEARER_RE = re.compile(r"^[Bb][Ee][Aa][Rr][Ee][Rr]\s+(.+)$")
+
+# Maximum age for a bearer token (seconds). Beyond this the token is stale.
+_MAX_TOKEN_AGE = 7 * 24 * 3600  # 7 days
+
+# Known stale/revoked token prefixes (first 8 chars of SHA-256 hash).
+# Populated via environment variable AO_REVOKED_TOKENS (comma-separated SHA-256 prefixes).
+_REVOKED_TOKEN_PREFIXES: set = set()
+
+
+def _get_bearer_token(auth_header: str) -> Optional[str]:
+    """Extract the token from an Authorization header, case-insensitively.
+
+    Returns the token string or None if the header is missing, malformed, or
+    uses an unsupported scheme.
+    """
+    if not auth_header:
+        return None
+    m = _BEARER_RE.match(auth_header)
+    if not m:
+        return None
+    return m.group(1).strip()
+
+
+def _is_token_stale(token: str) -> bool:
+    """Check whether a token exceeds the maximum allowed age.
+
+    Expects the token to embed a Unix timestamp as a colon suffix
+    (e.g. ``tok_abc:1717000000``).  Tokens that don't embed a timestamp
+    are assumed to be non-stale (pass through).
+    """
+    try:
+        parts = token.rsplit(":", 1)
+        if len(parts) < 2:
+            return False
+        ts = int(parts[-1])
+        age = time.time() - ts
+        return age > _MAX_TOKEN_AGE
+    except (ValueError, IndexError):
+        return False
+
+
+def _is_token_revoked(token: str) -> bool:
+    """Check whether the token's hash prefix is in the revoked set."""
+    if not _REVOKED_TOKEN_PREFIXES:
+        return False
+    h = hashlib.sha256(token.encode()).hexdigest()[:8]
+    return h in _REVOKED_TOKEN_PREFIXES
+
+
+def configure_revoked_tokens(prefixes: str) -> None:
+    """Load comma-separated SHA-256 prefixes from an env var value."""
+    global _REVOKED_TOKEN_PREFIXES
+    _REVOKED_TOKEN_PREFIXES = {p.strip() for p in prefixes.split(",") if p.strip()}
+
 
 class AuthMiddleware(BaseHTTPMiddleware):
+    """Middleware that validates Bearer tokens with case-insensitive scheme matching.
+
+    - Accepts ``Bearer``, ``bearer``, ``BEARER``, and any mixed-case variant
+      per RFC 7235 § 2.1.
+    - Rejects stale tokens (expired beyond ``_MAX_TOKEN_AGE``).
+    - Rejects revoked tokens (SHA-256 prefix match against ``AO_REVOKED_TOKENS``).
+    - Rejects anonymous / missing Authorization headers.
+    - Bypasses the ``/api/v2/auth/token`` public endpoint.
+    """
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if request.url.path.startswith("/api/v2") and request.url.path != "/api/v2/auth/token":
-            token = request.headers.get("Authorization", "")
-            if not token.startswith("Bearer "):
-                return Response(status_code=401, content="Unauthorized")
+        # Public endpoints — skip auth
+        if request.url.path.startswith("/api/v2/auth/token"):
+            return await call_next(request)
+
+        # Only protect /api/v2 routes
+        if not request.url.path.startswith("/api/v2"):
+            return await call_next(request)
+
+        auth_header = request.headers.get("Authorization", "")
+        token = _get_bearer_token(auth_header)
+
+        if token is None:
+            # No valid Bearer token found — case mismatch, missing, or wrong scheme
+            logger.warning("Auth rejected: missing or malformed Authorization header")
+            return Response(
+                status_code=401,
+                content='{"error":"Unauthorized","detail":"Missing or malformed Bearer token. '
+                        'Use a valid Authorization: Bearer <token> header (scheme is case-insensitive)."}',
+                media_type="application/json",
+            )
+
+        if _is_token_stale(token):
+            logger.warning("Auth rejected: stale token")
+            return Response(
+                status_code=401,
+                content='{"error":"Unauthorized","detail":"Token has expired or is stale. '
+                        'Request a fresh token."}',
+                media_type="application/json",
+            )
+
+        if _is_token_revoked(token):
+            logger.warning("Auth rejected: revoked token")
+            return Response(
+                status_code=403,
+                content='{"error":"Forbidden","detail":"Token has been revoked."}',
+                media_type="application/json",
+            )
+
+        # Attach token to request state for downstream handlers
+        request.state.token = token
+        request.state.auth_scheme = "Bearer"
+
         return await call_next(request)
 
 
@@ -49,131 +156,3 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         duration = time.time() - start
         logger.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s")
         return response
-
-# 2019-03-01T18:35:19 update
-
-# 2019-04-03T13:22:05 update
-
-# 2019-04-30T17:18:49 update
-
-# 2019-08-20T09:29:03 update
-
-# 2019-08-30T15:52:06 update
-
-# 2019-11-23T16:58:42 update
-
-# 2020-02-18T10:04:07 update
-
-# 2020-04-21T17:35:30 update
-
-# 2020-05-22T11:10:34 update
-
-# 2020-07-02T12:31:26 update
-
-# 2020-07-05T13:52:59 update
-
-# 2020-08-21T20:36:45 update
-
-# 2021-01-19T09:17:15 update
-
-# 2021-01-29T11:34:24 update
-
-# 2021-02-04T15:21:21 update
-
-# 2021-04-19T19:23:15 update
-
-# 2021-05-20T16:50:15 update
-
-# 2021-06-22T19:23:44 update
-
-# 2021-09-09T13:44:55 update
-
-# 2021-09-16T09:30:20 update
-
-# 2021-10-14T20:42:33 update
-
-# 2021-12-28T16:39:14 update
-
-# 2022-01-26T19:07:27 update
-
-# 2022-01-28T08:03:41 update
-
-# 2022-03-23T12:17:02 update
-
-# 2022-04-06T12:12:27 update
-
-# 2022-04-21T14:53:01 update
-
-# 2022-06-30T08:37:32 update
-
-# 2022-07-06T10:44:45 update
-
-# 2022-11-02T11:12:47 update
-
-# 2022-11-15T20:54:21 update
-
-# 2022-11-23T14:13:34 update
-
-# 2023-01-26T10:03:44 update
-
-# 2023-02-09T17:08:10 update
-
-# 2023-02-16T10:04:00 update
-
-# 2023-03-14T11:52:03 update
-
-# 2023-04-10T12:42:07 update
-
-# 2023-04-26T10:43:39 update
-
-# 2023-06-27T08:18:07 update
-
-# 2023-08-30T15:30:40 update
-
-# 2023-08-30T14:10:05 update
-
-# 2023-10-09T18:32:46 update
-
-# 2023-11-21T20:35:55 update
-
-# 2024-03-07T19:17:39 update
-
-# 2024-04-01T18:06:19 update
-
-# 2024-07-18T15:37:34 update
-
-# 2024-07-25T09:21:53 update
-
-# 2024-08-12T14:24:22 update
-
-# 2024-11-18T08:50:54 update
-
-# 2025-04-08T12:43:05 update
-
-# 2025-06-03T08:10:47 update
-
-# 2025-06-12T08:37:52 update
-
-# 2025-06-17T08:36:56 update
-
-# 2025-07-02T18:09:42 update
-
-# 2025-07-22T12:39:21 update
-
-# 2025-10-13T12:13:46 update
-
-# 2025-12-05T09:44:22 update
-
-# 2025-12-22T18:34:47 update
-
-# 2026-01-26T15:36:23 update
-
-# 2026-02-13T12:36:40 update
-
-# 2026-02-26T11:07:15 update
-
-# 2026-03-19T11:00:17 update
-
-# 2026-03-27T12:58:53 update
-
-# 2026-05-12T17:19:36 update
