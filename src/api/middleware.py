@@ -2,7 +2,7 @@
 
 import time
 import logging
-from typing import Callable
+from typing import Callable, Tuple
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -10,12 +10,107 @@ from starlette.responses import Response
 logger = logging.getLogger(__name__)
 
 
+def validate_token(token_value: str) -> Tuple[bool, str, str]:
+    """Validate a bearer token and return (is_valid, token_type, principal).
+
+    Token format: Bearer <type_prefix>_<id>.<signature>
+    - Machine tokens: mch_<id>.<sig>   -- CI/CD, automated workflows
+    - User tokens:    usr_<id>.<sig>   -- browser sessions, CLI logins
+
+    Returns:
+        (True, token_type, principal) on success
+        (False, reason, "") on failure
+    """
+    if not token_value or not token_value.startswith("Bearer "):
+        return (False, "missing_auth_header", "")
+
+    raw = token_value[len("Bearer "):].strip()
+    if not raw:
+        return (False, "empty_token", "")
+
+    if raw.startswith("mch_"):
+        parts = raw.split(".", 1)
+        if len(parts) != 2 or len(parts[1]) < 16:
+            return (False, "malformed_machine_token", "")
+        return (True, "machine", raw)
+
+    elif raw.startswith("usr_"):
+        parts = raw.split(".", 1)
+        if len(parts) != 2 or len(parts[1]) < 16:
+            return (False, "malformed_user_token", "")
+        return (True, "user", raw)
+
+    else:
+        return (False, "unknown_token_type", "")
+
+
+def authorize(token_type: str, method: str, path: str) -> Tuple[bool, str]:
+    """Check if token_type has permission for method:path.
+
+    Rules:
+    - Machine tokens: full CRUD on agents
+    - User tokens: read-only on agents, can manage own session
+    """
+    if (method, "/api/v2/auth/token") in {("POST", "/api/v2/auth/token")}:
+        if token_type == "user":
+            return (True, "")
+        return (False, "machine_tokens_cannot_manage_user_auth")
+
+    if path == "/health":
+        return (True, "")
+
+    if method in ("POST", "DELETE", "PUT", "PATCH") and path.startswith("/api/v2/agents"):
+        if token_type == "machine":
+            return (True, "")
+        return (False, "user_tokens_are_read_only_for_agents")
+
+    if method == "GET" and path.startswith("/api/v2/agents"):
+        return (True, "")
+
+    return (True, "")
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
+    """Enforces token-type-aware authentication and authorization.
+
+    Machine tokens (mch_*) -> full CRUD automation access
+    User tokens (usr_*)    -> read-only agent access, session management
+    """
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if request.url.path.startswith("/api/v2") and request.url.path != "/api/v2/auth/token":
-            token = request.headers.get("Authorization", "")
-            if not token.startswith("Bearer "):
-                return Response(status_code=401, content="Unauthorized")
+        path = request.url.path
+        method = request.method
+
+        if not path.startswith("/api/v2"):
+            return await call_next(request)
+
+        if path == "/api/v2/auth/token":
+            return await call_next(request)
+
+        token_header = request.headers.get("Authorization", "")
+        is_valid, token_type_or_reason, principal = validate_token(token_header)
+
+        if not is_valid:
+            logger.warning("Auth failed: %s for %s %s", token_type_or_reason, method, path)
+            return Response(
+                status_code=401,
+                content="Unauthorized: %s" % token_type_or_reason,
+            )
+
+        allowed, reason = authorize(token_type_or_reason, method, path)
+        if not allowed:
+            logger.warning(
+                "Authorization denied: %s token cannot %s %s (%s)",
+                token_type_or_reason, method, path, reason,
+            )
+            return Response(
+                status_code=403,
+                content="Forbidden: insufficient permissions for this token type",
+            )
+
+        request.state.token_type = token_type_or_reason
+        request.state.principal = principal
+
         return await call_next(request)
 
 
@@ -47,133 +142,5 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         start = time.time()
         response = await call_next(request)
         duration = time.time() - start
-        logger.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s")
+        logger.info("%s %s %s %.3fs", request.method, request.url.path, response.status_code, duration)
         return response
-
-# 2019-03-01T18:35:19 update
-
-# 2019-04-03T13:22:05 update
-
-# 2019-04-30T17:18:49 update
-
-# 2019-08-20T09:29:03 update
-
-# 2019-08-30T15:52:06 update
-
-# 2019-11-23T16:58:42 update
-
-# 2020-02-18T10:04:07 update
-
-# 2020-04-21T17:35:30 update
-
-# 2020-05-22T11:10:34 update
-
-# 2020-07-02T12:31:26 update
-
-# 2020-07-05T13:52:59 update
-
-# 2020-08-21T20:36:45 update
-
-# 2021-01-19T09:17:15 update
-
-# 2021-01-29T11:34:24 update
-
-# 2021-02-04T15:21:21 update
-
-# 2021-04-19T19:23:15 update
-
-# 2021-05-20T16:50:15 update
-
-# 2021-06-22T19:23:44 update
-
-# 2021-09-09T13:44:55 update
-
-# 2021-09-16T09:30:20 update
-
-# 2021-10-14T20:42:33 update
-
-# 2021-12-28T16:39:14 update
-
-# 2022-01-26T19:07:27 update
-
-# 2022-01-28T08:03:41 update
-
-# 2022-03-23T12:17:02 update
-
-# 2022-04-06T12:12:27 update
-
-# 2022-04-21T14:53:01 update
-
-# 2022-06-30T08:37:32 update
-
-# 2022-07-06T10:44:45 update
-
-# 2022-11-02T11:12:47 update
-
-# 2022-11-15T20:54:21 update
-
-# 2022-11-23T14:13:34 update
-
-# 2023-01-26T10:03:44 update
-
-# 2023-02-09T17:08:10 update
-
-# 2023-02-16T10:04:00 update
-
-# 2023-03-14T11:52:03 update
-
-# 2023-04-10T12:42:07 update
-
-# 2023-04-26T10:43:39 update
-
-# 2023-06-27T08:18:07 update
-
-# 2023-08-30T15:30:40 update
-
-# 2023-08-30T14:10:05 update
-
-# 2023-10-09T18:32:46 update
-
-# 2023-11-21T20:35:55 update
-
-# 2024-03-07T19:17:39 update
-
-# 2024-04-01T18:06:19 update
-
-# 2024-07-18T15:37:34 update
-
-# 2024-07-25T09:21:53 update
-
-# 2024-08-12T14:24:22 update
-
-# 2024-11-18T08:50:54 update
-
-# 2025-04-08T12:43:05 update
-
-# 2025-06-03T08:10:47 update
-
-# 2025-06-12T08:37:52 update
-
-# 2025-06-17T08:36:56 update
-
-# 2025-07-02T18:09:42 update
-
-# 2025-07-22T12:39:21 update
-
-# 2025-10-13T12:13:46 update
-
-# 2025-12-05T09:44:22 update
-
-# 2025-12-22T18:34:47 update
-
-# 2026-01-26T15:36:23 update
-
-# 2026-02-13T12:36:40 update
-
-# 2026-02-26T11:07:15 update
-
-# 2026-03-19T11:00:17 update
-
-# 2026-03-27T12:58:53 update
-
-# 2026-05-12T17:19:36 update
