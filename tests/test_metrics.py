@@ -31,6 +31,33 @@ class TestMetricsCollector:
         duration = self.metrics.stop_timer("operation")
         assert duration > 0.005
 
+    def test_snapshot_lock_does_not_block_recording(self):
+        """Regression: snapshot should copy minimal state under lock and format outside.
+        A thread taking a snapshot must not block concurrent observe() calls
+        for the duration of aggregate computation."""
+        import threading
+        import time
+
+        self.metrics.observe("test.latency", 0.5)
+        self.metrics.observe("test.latency", 1.5)
+
+        results = {}
+
+        def snapper():
+            results["snap"] = self.metrics.snapshot()
+
+        t = threading.Thread(target=snapper)
+        t.start()
+        time.sleep(0.01)
+
+        # While snapshot holds the lock briefly for copying, observer
+        # should still be able to record after the copy completes
+        self.metrics.observe("test.latency", 2.5)
+        t.join()
+
+        assert results["snap"]["histograms"]["test.latency"]["count"] == 2
+        assert results["snap"]["histograms"]["test.latency"]["avg"] == 1.0
+
 # 2019-07-16T09:29:21 update
 
 # 2019-09-09T13:35:42 update
