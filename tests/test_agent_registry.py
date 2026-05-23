@@ -1,5 +1,5 @@
 import pytest
-from src.agent.registry import AgentRegistry, AgentStatus
+from src.agent.registry import AgentRegistry, AgentStatus, CapabilityContract
 
 
 class TestAgentRegistry:
@@ -48,110 +48,102 @@ class TestAgentRegistry:
     def test_delete_nonexistent_agent(self):
         assert not self.registry.delete("nonexistent-id")
 
-# 2019-01-23T10:28:57 update
 
-# 2019-01-28T18:15:57 update
+class TestCapabilityContract:
+    def test_init_default_schema(self):
+        cc = CapabilityContract()
+        assert cc.version == 1
+        assert cc.contract_hash is not None
 
-# 2019-02-22T11:46:37 update
+    def test_init_with_schema(self):
+        cc = CapabilityContract({"actions": ["read", "write"], "max_concurrency": 5})
+        assert cc.version == 1
+        assert cc.get_schema() == {"actions": ["read", "write"], "max_concurrency": 5}
 
-# 2019-03-27T14:43:52 update
+    def test_update_schema_changes_version(self):
+        cc = CapabilityContract({"version": "1.0"})
+        old_hash = cc.contract_hash
+        assert cc.update_schema({"version": "2.0"})
+        assert cc.version == 2
+        assert cc.contract_hash != old_hash
 
-# 2019-04-12T16:58:25 update
+    def test_update_schema_identical_no_change(self):
+        cc = CapabilityContract({"key": "value"})
+        assert not cc.update_schema({"key": "value"})
+        assert cc.version == 1
 
-# 2019-05-27T15:15:18 update
+    def test_get_schema_returns_copy(self):
+        cc = CapabilityContract({"key": "value"})
+        schema = cc.get_schema()
+        schema["new_key"] = "new_value"
+        assert "new_key" not in cc.get_schema()
 
-# 2019-07-17T14:36:58 update
 
-# 2019-09-06T12:29:31 update
+class TestStaleContractEnforcement:
+    def setup_method(self):
+        self.registry = AgentRegistry()
 
-# 2019-11-27T17:43:26 update
+    def test_get_returns_none_for_stale_agent(self):
+        aid = self.registry.register("agent", "worker")
+        assert self.registry.get(aid) is not None
+        self.registry.update_contract_schema({"new": "schema"})
+        assert self.registry.get(aid) is None
 
-# 2019-11-28T08:42:43 update
+    def test_get_or_invalidate_removes_stale_agent(self):
+        aid = self.registry.register("agent", "worker")
+        self.registry.update_contract_schema({"new": "schema"})
+        result = self.registry.get_or_invalidate(aid)
+        assert result is None
+        assert self.registry.count() == 0
 
-# 2019-12-03T20:34:02 update
+    def test_list_excludes_stale_agents(self):
+        aid1 = self.registry.register("agent-1", "worker")
+        aid2 = self.registry.register("agent-2", "worker")
+        assert len(self.registry.list()) == 2
+        self.registry.update_contract_schema({"v2": True})
+        self.registry.register("agent-3", "worker")
+        assert len(self.registry.list()) == 1
 
-# 2019-12-26T08:15:09 update
+    def test_update_status_rejected_for_stale_agent(self):
+        aid = self.registry.register("agent", "worker")
+        self.registry.update_contract_schema({"v2": True})
+        assert not self.registry.update_status(aid, AgentStatus.RUNNING)
 
-# 2020-01-07T09:36:32 update
+    def test_invalidate_stale_cleans_multiple(self):
+        a1 = self.registry.register("a1", "worker")
+        a2 = self.registry.register("a2", "worker")
+        a3 = self.registry.register("a3", "worker")
+        self.registry.update_contract_schema({"v2": True})
+        self.registry.register("a4", "worker")
+        count = self.registry.invalidate_stale()
+        assert count == 3
+        assert self.registry.count() == 1
 
-# 2020-01-10T12:44:52 update
+    def test_invalidate_all_clears_everything(self):
+        self.registry.register("a1", "worker")
+        self.registry.register("a2", "worker")
+        count = self.registry.invalidate_all()
+        assert count == 2
+        assert self.registry.count() == 0
 
-# 2020-07-05T19:33:32 update
+    def test_fresh_agents_after_contract_update_work_normally(self):
+        self.registry.register("old-agent", "worker")
+        self.registry.update_contract_schema({"v2": True})
+        aid = self.registry.register("new-agent", "worker")
+        agent = self.registry.get(aid)
+        assert agent is not None
+        assert agent["name"] == "new-agent"
+        assert self.registry.update_status(aid, AgentStatus.RUNNING)
 
-# 2020-07-07T14:16:11 update
+    def test_contract_version_tracks_changes(self):
+        assert self.registry.get_contract_version() == 1
+        self.registry.update_contract_schema({"v2": True})
+        assert self.registry.get_contract_version() == 2
+        self.registry.update_contract_schema({"v3": True})
+        assert self.registry.get_contract_version() == 3
 
-# 2020-07-28T08:29:39 update
-
-# 2020-08-26T18:58:21 update
-
-# 2020-08-28T09:50:37 update
-
-# 2020-09-17T15:23:33 update
-
-# 2020-09-23T16:22:24 update
-
-# 2020-10-14T13:27:24 update
-
-# 2020-11-20T11:40:04 update
-
-# 2020-12-10T13:55:01 update
-
-# 2020-12-25T20:33:02 update
-
-# 2021-03-22T19:53:48 update
-
-# 2021-03-26T15:02:19 update
-
-# 2021-07-16T20:24:40 update
-
-# 2021-07-22T13:19:23 update
-
-# 2021-08-16T19:11:26 update
-
-# 2021-10-02T13:32:20 update
-
-# 2021-10-23T18:31:31 update
-
-# 2021-10-29T13:55:10 update
-
-# 2022-07-31T17:35:39 update
-
-# 2022-09-27T09:32:34 update
-
-# 2022-11-07T14:44:52 update
-
-# 2023-01-23T14:07:09 update
-
-# 2023-03-16T15:23:38 update
-
-# 2023-07-03T18:33:44 update
-
-# 2023-07-27T09:35:11 update
-
-# 2023-11-16T11:22:59 update
-
-# 2023-12-20T14:25:29 update
-
-# 2024-03-07T17:32:49 update
-
-# 2024-04-10T10:50:42 update
-
-# 2024-06-19T19:57:49 update
-
-# 2024-12-05T18:02:46 update
-
-# 2025-01-15T16:13:24 update
-
-# 2025-03-12T20:58:57 update
-
-# 2025-06-24T20:33:23 update
-
-# 2025-08-25T10:56:35 update
-
-# 2025-09-12T17:09:51 update
-
-# 2025-10-06T20:01:10 update
-
-# 2025-10-14T11:48:40 update
-
-# 2026-01-29T13:09:29 update
+    def test_contract_hash_changes_on_update(self):
+        h1 = self.registry.get_contract_hash()
+        self.registry.update_contract_schema({"new": "schema"})
+        h2 = self.registry.get_contract_hash()
+        assert h1 != h2
