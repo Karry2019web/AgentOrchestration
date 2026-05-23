@@ -1,5 +1,5 @@
 import pytest
-from src.agent.registry import AgentRegistry, AgentStatus
+from src.agent.registry import AgentRegistry, AgentStatus, _validate_handler_name
 
 
 class TestAgentRegistry:
@@ -48,110 +48,48 @@ class TestAgentRegistry:
     def test_delete_nonexistent_agent(self):
         assert not self.registry.delete("nonexistent-id")
 
-# 2019-01-23T10:28:57 update
 
-# 2019-01-28T18:15:57 update
+class TestHandlerNameValidation:
+    def test_validate_empty_name(self):
+        with pytest.raises(ValueError, match="non-empty string"):
+            _validate_handler_name("")
 
-# 2019-02-22T11:46:37 update
+    def test_validate_none_name(self):
+        with pytest.raises(ValueError, match="non-empty string"):
+            _validate_handler_name(None)
 
-# 2019-03-27T14:43:52 update
+    def test_validate_valid_name(self):
+        _validate_handler_name("my-handler")
+        _validate_handler_name("worker.processor")
+        _validate_handler_name("agent_42")
 
-# 2019-04-12T16:58:25 update
+    def test_reject_double_dot_prefix(self):
+        with pytest.raises(ValueError, match="path traversal"):
+            _validate_handler_name("../etc/passwd")
 
-# 2019-05-27T15:15:18 update
+    def test_reject_double_dot_slash(self):
+        with pytest.raises(ValueError, match="path traversal"):
+            _validate_handler_name("plugins/../../../malicious")
 
-# 2019-07-17T14:36:58 update
+    def test_reject_double_dot_backslash(self):
+        with pytest.raises(ValueError, match="path traversal"):
+            _validate_handler_name("plugins\\..\\..\\malicious")
 
-# 2019-09-06T12:29:31 update
+    def test_reject_double_dot_suffix(self):
+        with pytest.raises(ValueError, match="path traversal"):
+            _validate_handler_name("safe/..")
 
-# 2019-11-27T17:43:26 update
+    def test_register_rejects_path_traversal(self):
+        registry = AgentRegistry()
+        with pytest.raises(ValueError, match="path traversal"):
+            registry.register("../../malicious", "worker.processor")
 
-# 2019-11-28T08:42:43 update
+    def test_register_rejects_type_with_path_traversal(self):
+        registry = AgentRegistry()
+        with pytest.raises(ValueError, match="path traversal"):
+            registry.register("safe-name", "../../malicious")
 
-# 2019-12-03T20:34:02 update
-
-# 2019-12-26T08:15:09 update
-
-# 2020-01-07T09:36:32 update
-
-# 2020-01-10T12:44:52 update
-
-# 2020-07-05T19:33:32 update
-
-# 2020-07-07T14:16:11 update
-
-# 2020-07-28T08:29:39 update
-
-# 2020-08-26T18:58:21 update
-
-# 2020-08-28T09:50:37 update
-
-# 2020-09-17T15:23:33 update
-
-# 2020-09-23T16:22:24 update
-
-# 2020-10-14T13:27:24 update
-
-# 2020-11-20T11:40:04 update
-
-# 2020-12-10T13:55:01 update
-
-# 2020-12-25T20:33:02 update
-
-# 2021-03-22T19:53:48 update
-
-# 2021-03-26T15:02:19 update
-
-# 2021-07-16T20:24:40 update
-
-# 2021-07-22T13:19:23 update
-
-# 2021-08-16T19:11:26 update
-
-# 2021-10-02T13:32:20 update
-
-# 2021-10-23T18:31:31 update
-
-# 2021-10-29T13:55:10 update
-
-# 2022-07-31T17:35:39 update
-
-# 2022-09-27T09:32:34 update
-
-# 2022-11-07T14:44:52 update
-
-# 2023-01-23T14:07:09 update
-
-# 2023-03-16T15:23:38 update
-
-# 2023-07-03T18:33:44 update
-
-# 2023-07-27T09:35:11 update
-
-# 2023-11-16T11:22:59 update
-
-# 2023-12-20T14:25:29 update
-
-# 2024-03-07T17:32:49 update
-
-# 2024-04-10T10:50:42 update
-
-# 2024-06-19T19:57:49 update
-
-# 2024-12-05T18:02:46 update
-
-# 2025-01-15T16:13:24 update
-
-# 2025-03-12T20:58:57 update
-
-# 2025-06-24T20:33:23 update
-
-# 2025-08-25T10:56:35 update
-
-# 2025-09-12T17:09:51 update
-
-# 2025-10-06T20:01:10 update
-
-# 2025-10-14T11:48:40 update
-
-# 2026-01-29T13:09:29 update
+    def test_resolve_rejects_path_traversal(self):
+        registry = AgentRegistry()
+        with pytest.raises(ValueError, match="path traversal"):
+            registry.resolve("../etc/passwd")
