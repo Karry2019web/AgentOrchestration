@@ -12,6 +12,8 @@ class MetricsCollector:
         self._counters: Dict[str, int] = defaultdict(int)
         self._gauges: Dict[str, float] = {}
         self._histograms: Dict[str, List[float]] = defaultdict(list)
+        self._histogram_mins: Dict[str, float] = {}
+        self._histogram_maxes: Dict[str, float] = {}
         self._timers: Dict[str, float] = {}
 
     def increment(self, metric: str, value: int = 1) -> None:
@@ -25,6 +27,10 @@ class MetricsCollector:
     def observe(self, metric: str, value: float) -> None:
         with self._lock:
             self._histograms[metric].append(value)
+            if metric not in self._histogram_mins or value < self._histogram_mins[metric]:
+                self._histogram_mins[metric] = value
+            if metric not in self._histogram_maxes or value > self._histogram_maxes[metric]:
+                self._histogram_maxes[metric] = value
 
     def start_timer(self, metric: str) -> None:
         with self._lock:
@@ -43,8 +49,13 @@ class MetricsCollector:
             return {
                 "counters": dict(self._counters),
                 "gauges": dict(self._gauges),
-                "histograms": {k: {"count": len(v), "sum": sum(v), "avg": sum(v) / len(v) if v else 0}
-                               for k, v in self._histograms.items()},
+                "histograms": {k: {
+                    "count": len(v),
+                    "sum": sum(v),
+                    "avg": sum(v) / len(v) if v else 0,
+                    "min": self._histogram_mins.get(k),
+                    "max": self._histogram_maxes.get(k),
+                } for k, v in self._histograms.items()},
             }
 
 
