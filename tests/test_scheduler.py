@@ -36,6 +36,56 @@ class TestTaskScheduler:
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.fail(task["id"])
 
+
+class TestTimeZoneAwareSchedule:
+    def setup_method(self):
+        from src.orchestrator.scheduler import TaskScheduler
+        self.scheduler = TaskScheduler()
+
+    def test_schedule_with_float_delay(self):
+        tid = self.scheduler.schedule({"type": "test"}, 10.0)
+        assert tid is not None
+
+    def test_schedule_with_timedelta(self):
+        from datetime import timedelta
+        tid = self.scheduler.schedule({"type": "test"}, timedelta(minutes=5))
+        assert tid is not None
+
+    def test_schedule_with_naive_datetime_utc(self):
+        from datetime import datetime, timezone
+        future = datetime(2099, 1, 1, 0, 0, 0)
+        tid = self.scheduler.schedule({"type": "test"}, future)
+        assert tid is not None
+        assert tid in self.scheduler._scheduled
+        assert self.scheduler._scheduled[tid] > time.time()
+
+    def test_schedule_with_aware_datetime(self):
+        from datetime import datetime, timezone, timedelta
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        tid = self.scheduler.schedule({"type": "test"}, future)
+        assert tid is not None
+        scheduled_time = self.scheduler._scheduled[tid]
+        now = time.time()
+        assert scheduled_time > now
+        assert abs(scheduled_time - now - 3600) < 10
+
+    def test_schedule_normalizes_timezone_aware_datetime(self):
+        from datetime import datetime, timezone, timedelta
+        # Eastern time (UTC-5)
+        tz_ny = timezone(timedelta(hours=-5))
+        ny_time = datetime(2099, 6, 15, 8, 0, 0, tzinfo=tz_ny)
+        tid_ny = self.scheduler.schedule({"type": "test"}, ny_time)
+
+        # UTC time (should be same moment, 5 hours later)
+        tz_utc = timezone.utc
+        utc_time = datetime(2099, 6, 15, 13, 0, 0, tzinfo=tz_utc)
+        tid_utc = self.scheduler.schedule({"type": "test"}, utc_time)
+
+        # Both should schedule at approximately the same unix timestamp
+        import time
+        diff = abs(self.scheduler._scheduled[tid_ny] - self.scheduler._scheduled[tid_utc])
+        assert diff < 1.0
+
 # 2019-01-09T19:07:03 update
 
 # 2019-02-18T12:30:02 update
