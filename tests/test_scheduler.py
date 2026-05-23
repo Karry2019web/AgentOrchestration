@@ -153,3 +153,50 @@ class TestTaskScheduler:
 # 2026-01-12T16:53:28 update
 
 # 2026-04-16T16:58:23 update
+
+
+class TestJobDeduplication:
+    """Verify scheduled job deduplication during rolling deployments."""
+
+    def setup_method(self):
+        self.scheduler = TaskScheduler()
+
+    def test_identical_jobs_deduplicated(self):
+        """Same job registered twice should return None the second time."""
+        task = {"type": "cron_health_check", "payload": {"endpoint": "/health"}}
+        first_id = self.scheduler.schedule(task, 60.0)
+        assert first_id is not None
+        second_id = self.scheduler.schedule(task, 60.0)
+        assert second_id is None
+
+    def test_different_jobs_not_deduplicated(self):
+        """Different jobs should both be allowed."""
+        task_a = {"type": "health_check", "payload": {"endpoint": "/health"}}
+        task_b = {"type": "report", "payload": {"type": "daily"}}
+        id_a = self.scheduler.schedule(task_a, 60.0)
+        id_b = self.scheduler.schedule(task_b, 60.0)
+        assert id_a is not None
+        assert id_b is not None
+        assert id_a != id_b
+
+    def test_leader_can_register_jobs(self):
+        """Leader instance should be able to register cron jobs."""
+        self.scheduler.lease.acquire()
+        task_id = self.scheduler.register_cron_job(
+            {"type": "report", "payload": {"format": "csv"}}, 300.0
+        )
+        assert task_id is not None
+
+    def test_non_leader_skips_jobs(self):
+        """Non-leader instance should skip cron job registration."""
+        task_id = self.scheduler.register_cron_job(
+            {"type": "report", "payload": {"format": "csv"}}, 300.0
+        )
+        assert task_id is None
+
+    def test_lease_expiry(self):
+        """Lease should expire after TTL."""
+        self.scheduler.lease.acquire()
+        assert self.scheduler.lease.is_leader
+        self.scheduler.lease._acquired_at = time.time() - 60
+        assert not self.scheduler.lease.is_leader
