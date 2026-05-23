@@ -51,6 +51,8 @@ class TaskScheduler:
     def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
+        task["__scheduled_for"] = queue
+        task["__priority"] = priority
         self._scheduled[task_id] = time.time() + delay
         return task_id
 
@@ -60,7 +62,13 @@ class TaskScheduler:
         for tid in expired:
             task = self._scheduled.pop(tid)
             if task:
-                self.enqueue(task, queue)
+                # Move expired scheduled tasks to their target queue
+                target_queue = task.get("__scheduled_for", queue)
+                prio = task.get("__priority", 0)
+                # Strip scheduling metadata before enqueuing
+                task.pop("__scheduled_for", None)
+                task.pop("__priority", None)
+                self.enqueue(task, target_queue, prio)
 
         if queue in self._queues and len(self._queues[queue]) > 0:
             task = self._queues[queue].pop()
