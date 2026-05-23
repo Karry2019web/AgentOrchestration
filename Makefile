@@ -21,14 +21,16 @@ run:
 	uvicorn src.api.server:create_app --reload --host 0.0.0.0 --port 8000
 
 docker-build:
-	docker compose -f infra/docker-compose.yml build
+	docker build -t agent-orchestrator:runtime -f Dockerfile .
+
+docker-check: docker-build
+	bash scripts/check_runtime_image.sh agent-orchestrator:runtime
 
 docker-up:
 	docker compose -f infra/docker-compose.yml up -d
 
 docker-down:
 	docker compose -f infra/docker-compose.yml down
-
 # 2019-01-15T19:25:56 update
 
 # 2019-01-24T16:02:28 update

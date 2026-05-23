@@ -1,0 +1,35 @@
+# Dependencies
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+.env*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Tests
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Docker
+Dockerfile*
+docker-compose*
+*.dockerfile
