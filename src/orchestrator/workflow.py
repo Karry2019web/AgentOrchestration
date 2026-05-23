@@ -1,8 +1,11 @@
 """Workflow Manager — Defines and executes multi-step agent workflows."""
 
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 from uuid import uuid4
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class StepStatus(Enum):
@@ -23,6 +26,7 @@ class WorkflowStep:
         self.status = StepStatus.PENDING
         self.result: Any = None
         self.error: Optional[str] = None
+        self.depends_on: Set[str] = set()  # step IDs this step depends on
 
 
 class Workflow:
@@ -39,8 +43,60 @@ class Workflow:
         self._step_map[step.id] = step
         return self
 
+    def add_step_with_dependencies(self, step: WorkflowStep, depends_on: List[WorkflowStep]) -> "Workflow":
+        """Add a step that depends on one or more predecessor steps (fan-in join)."""
+        for dep in depends_on:
+            step.depends_on.add(dep.id)
+        self.steps.append(step)
+        self._step_map[step.id] = step
+        return self
+
     def get_step(self, step_id: str) -> Optional[WorkflowStep]:
         return self._step_map.get(step_id)
+
+    def validate_dependencies(self) -> List[str]:
+        """Validate the dependency graph and return any errors found.
+
+        Checks for:
+        - Missing dependencies (referenced step IDs that don't exist)
+        - Circular dependencies
+        """
+        errors: List[str] = []
+
+        for step in self.steps:
+            for dep_id in step.depends_on:
+                if dep_id not in self._step_map:
+                    errors.append(
+                        f"Step '{step.name}' depends on unknown step id '{dep_id}'"
+                    )
+
+        # Check for cycles using DFS
+        visited: Set[str] = set()  # permanently visited
+        rec_stack: Set[str] = set()  # currently on the recursion stack
+
+        def _has_cycle(step_id: str) -> bool:
+            if step_id in rec_stack:
+                return True
+            if step_id in visited:
+                return False
+            rec_stack.add(step_id)
+            step = self._step_map.get(step_id)
+            if step:
+                for dep_id in step.depends_on:
+                    if _has_cycle(dep_id):
+                        return True
+            rec_stack.discard(step_id)
+            visited.add(step_id)
+            return False
+
+        for step in self.steps:
+            if step.id not in visited:
+                if _has_cycle(step.id):
+                    errors.append(
+                        f"Circular dependency detected involving step '{step.name}'"
+                    )
+
+        return errors
 
 
 class WorkflowManager:
@@ -51,6 +107,24 @@ class WorkflowManager:
         workflow = Workflow(name, description)
         self._workflows[workflow.id] = workflow
         return workflow
+
+    def register_workflow(self, workflow: Workflow) -> bool:
+        """Register a workflow, validating its dependency graph first.
+
+        Returns True if the workflow passes validation and is registered.
+        Returns False if validation fails — the workflow is rejected.
+        """
+        errors = workflow.validate_dependencies()
+        if errors:
+            logger.error(
+                "Workflow '%s' rejected during registration: %s",
+                workflow.name,
+                "; ".join(errors),
+            )
+            return False
+        self._workflows[workflow.id] = workflow
+        logger.info("Workflow '%s' registered successfully (id=%s)", workflow.name, workflow.id)
+        return True
 
     def get_workflow(self, workflow_id: str) -> Optional[Workflow]:
         return self._workflows.get(workflow_id)
@@ -67,129 +141,100 @@ class WorkflowManager:
             return False
 
         workflow.status = StepStatus.RUNNING
-        for step in workflow.steps:
-            step.status = StepStatus.RUNNING
-            try:
-                result = step.handler()
-                step.result = result
-                step.status = StepStatus.COMPLETED
-            except Exception as e:
-                step.error = str(e)
-                step.status = StepStatus.FAILED
-                workflow.status = StepStatus.FAILED
-                return False
+
+        # Resolve fan-in order: run steps in topological order
+        executed: Set[str] = set()
+        failed_steps: Dict[str, str] = {}  # step_id -> error message
+        skipped_steps: Set[str] = set()
+
+        def _deps_satisfied(step: WorkflowStep) -> bool:
+            for dep_id in step.depends_on:
+                if dep_id not in executed:
+                    return False
+            return True
+
+        def _any_dep_failed(step: WorkflowStep) -> bool:
+            for dep_id in step.depends_on:
+                if dep_id in failed_steps:
+                    return True
+            return False
+
+        # Execute steps in dependency order
+        remaining = set(step.id for step in workflow.steps)
+
+        while remaining:
+            progress = False
+            for step in workflow.steps:
+                if step.id not in remaining:
+                    continue
+                if not _deps_satisfied(step):
+                    continue
+
+                # If any dependency failed, skip this step — preserve failure status
+                if _any_dep_failed(step):
+                    step.status = StepStatus.SKIPPED
+                    skipped_steps.add(step.id)
+                    remaining.discard(step.id)
+                    logger.info(
+                        "Step '%s' skipped — dependency '%s' failed (workflow %s)",
+                        step.name,
+                        next((s.name for s in workflow.steps if s.id in step.depends_on and s.id in failed_steps), "unknown"),
+                        workflow.name,
+                    )
+                    progress = True
+                    continue
+
+                # Execute the step
+                step.status = StepStatus.RUNNING
+                try:
+                    result = step.handler()
+                    step.result = result
+                    step.status = StepStatus.COMPLETED
+                    executed.add(step.id)
+                    remaining.discard(step.id)
+                    progress = True
+                except Exception as e:
+                    step.error = str(e)
+                    step.status = StepStatus.FAILED
+                    failed_steps[step.id] = str(e)
+                    remaining.discard(step.id)
+                    progress = True
+                    logger.warning(
+                        "Step '%s' failed in workflow '%s': %s",
+                        step.name,
+                        workflow.name,
+                        e,
+                    )
+
+            if not progress:
+                # Deadlock: remaining steps have unmet dependencies that will never resolve
+                for step in workflow.steps:
+                    if step.id in remaining:
+                        step.status = StepStatus.SKIPPED
+                        skipped_steps.add(step.id)
+                        remaining.discard(step.id)
+                        logger.warning(
+                            "Step '%s' in workflow '%s' skipped due to unresolvable dependency",
+                            step.name,
+                            workflow.name,
+                        )
+                break
+
+        if failed_steps:
+            workflow.status = StepStatus.FAILED
+            logger.warning(
+                "Workflow '%s' failed after %d completed, %d failed, %d skipped",
+                workflow.name,
+                len(executed),
+                len(failed_steps),
+                len(skipped_steps),
+            )
+            return False
 
         workflow.status = StepStatus.COMPLETED
+        logger.info(
+            "Workflow '%s' completed successfully (%d steps)",
+            workflow.name,
+            len(executed),
+        )
         return True
-
-# 2019-03-27T19:58:07 update
-
-# 2019-05-09T09:42:56 update
-
-# 2019-12-03T10:07:42 update
-
-# 2020-01-16T18:43:28 update
-
-# 2020-03-20T10:40:15 update
-
-# 2020-04-17T15:36:50 update
-
-# 2020-05-04T14:44:01 update
-
-# 2020-06-16T13:17:31 update
-
-# 2020-08-05T17:00:24 update
-
-# 2020-09-04T08:29:23 update
-
-# 2020-09-09T17:52:02 update
-
-# 2020-10-23T10:57:44 update
-
-# 2020-12-05T20:55:47 update
-
-# 2021-01-15T19:23:40 update
-
-# 2021-02-03T20:43:12 update
-
-# 2021-03-16T12:26:47 update
-
-# 2021-04-20T14:33:28 update
-
-# 2021-10-14T15:03:32 update
-
-# 2021-10-21T17:24:55 update
-
-# 2021-11-16T17:01:08 update
-
-# 2021-11-22T09:51:21 update
-
-# 2021-12-21T16:15:47 update
-
-# 2022-03-23T16:52:27 update
-
-# 2022-12-21T09:25:50 update
-
-# 2023-01-09T09:55:25 update
-
-# 2023-01-13T11:06:15 update
-
-# 2023-01-26T11:00:59 update
-
-# 2023-02-23T08:56:54 update
-
-# 2023-05-17T08:07:16 update
-
-# 2023-06-06T17:09:34 update
-
-# 2023-06-13T10:35:28 update
-
-# 2023-08-24T20:36:06 update
-
-# 2023-10-30T19:10:13 update
-
-# 2024-01-02T08:27:25 update
-
-# 2024-01-24T12:13:15 update
-
-# 2024-02-08T13:35:49 update
-
-# 2024-05-07T16:09:24 update
-
-# 2024-05-11T09:48:46 update
-
-# 2024-05-21T19:25:41 update
-
-# 2024-06-05T12:00:30 update
-
-# 2024-06-25T09:40:26 update
-
-# 2024-09-17T13:49:39 update
-
-# 2024-10-14T17:39:35 update
-
-# 2024-11-27T20:14:35 update
-
-# 2024-12-25T19:31:41 update
-
-# 2025-01-16T13:15:09 update
-
-# 2025-02-05T14:06:59 update
-
-# 2025-02-17T20:55:11 update
-
-# 2025-04-30T19:36:53 update
-
-# 2025-07-17T10:14:40 update
-
-# 2025-08-29T12:13:15 update
-
-# 2025-09-03T13:51:11 update
-
-# 2025-09-19T16:08:24 update
-
-# 2025-11-27T08:38:12 update
-
-# 2026-01-27T13:23:38 update
-
-# 2026-01-28T11:22:50 update
