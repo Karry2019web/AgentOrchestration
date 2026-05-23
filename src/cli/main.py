@@ -23,9 +23,19 @@ def cli():
     status_parser = subparsers.add_parser("status", help="Show agent status")
     status_parser.add_argument("--watch", "-w", action="store_true", help="Watch mode")
 
+    def _positive_int(value: str) -> int:
+        """Argparse type that ensures the value is a non-negative integer."""
+        try:
+            val = int(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"invalid int value: {value!r}")
+        if val < 0:
+            raise argparse.ArgumentTypeError(f"tail must be >= 0, got {val}")
+        return val
+
     logs_parser = subparsers.add_parser("logs", help="View agent logs")
     logs_parser.add_argument("agent_id", help="Agent ID")
-    logs_parser.add_argument("--tail", "-t", type=int, default=50, help="Number of lines")
+    logs_parser.add_argument("--tail", "-t", type=_positive_int, default=50, help="Number of lines")
 
     args = parser.parse_args()
 
