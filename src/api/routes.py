@@ -9,6 +9,23 @@ router = APIRouter()
 registry = AgentRegistry()
 
 
+def _validate_agent_config(name: str, agent_type: str, config: Optional[Dict] = None) -> None:
+    """Validate agent registration inputs before passing to the registry.
+    
+    Raises HTTPException with 422 status if validation fails.
+    """
+    if not name or not name.strip():
+        raise HTTPException(status_code=422, detail="Agent name is required and must be non-empty")
+    if not agent_type or not agent_type.strip():
+        raise HTTPException(status_code=422, detail="Agent type is required and must be non-empty")
+    if config is not None and not isinstance(config, dict):
+        raise HTTPException(status_code=422, detail="Agent config must be a dictionary if provided")
+    if config is not None:
+        for key in config:
+            if not isinstance(key, str) or not key.strip():
+                raise HTTPException(status_code=422, detail="Config keys must be non-empty strings")
+
+
 @router.get("/agents")
 async def list_agents(status: Optional[str] = None, group: Optional[str] = None):
     status_filter = AgentStatus(status) if status else None
@@ -17,6 +34,7 @@ async def list_agents(status: Optional[str] = None, group: Optional[str] = None)
 
 @router.post("/agents")
 async def register_agent(name: str, agent_type: str, config: Optional[Dict] = None):
+    _validate_agent_config(name, agent_type, config)
     agent_id = registry.register(name, agent_type, config)
     return {"agent_id": agent_id, "status": "registered"}
 
@@ -191,3 +209,4 @@ async def agent_count():
 # 2026-04-09T20:30:37 update
 
 # 2026-05-13T11:36:25 update
+
