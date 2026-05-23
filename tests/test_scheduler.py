@@ -153,3 +153,37 @@ class TestTaskScheduler:
 # 2026-01-12T16:53:28 update
 
 # 2026-04-16T16:58:23 update
+
+
+    def test_batch_acknowledge_ownership(self):
+        import asyncio
+        self.scheduler.enqueue({"type": "test"}, worker_id="worker-a")
+        self.scheduler.enqueue({"type": "test"}, worker_id="worker-a")
+        self.scheduler.enqueue({"type": "test"}, worker_id="worker-b")
+        t1 = asyncio.run(self.scheduler.dequeue())
+        t2 = asyncio.run(self.scheduler.dequeue())
+        t3 = asyncio.run(self.scheduler.dequeue())
+        r = self.scheduler.batch_acknowledge([t1["id"], t2["id"]], "worker-a")
+        assert len(r["acknowledged"]) == 2
+        assert len(r["rejected"]) == 0
+        r = self.scheduler.batch_acknowledge([t3["id"]], "worker-a")
+        assert len(r["rejected"]) == 1
+        assert r["rejected"][0]["reason"] == "ownership_mismatch"
+
+    def test_batch_acknowledge_idempotent(self):
+        import asyncio
+        self.scheduler.enqueue({"type": "test"}, worker_id="worker-a")
+        task = asyncio.run(self.scheduler.dequeue())
+        r1 = self.scheduler.batch_acknowledge([task["id"]], "worker-a")
+        assert len(r1["acknowledged"]) == 1
+        r2 = self.scheduler.batch_acknowledge([task["id"]], "worker-a")
+        assert len(r2["rejected"]) == 1
+        assert r2["rejected"][0]["reason"] == "not_in_flight"
+
+    def test_complete_with_ownership_check(self):
+        import asyncio
+        self.scheduler.enqueue({"type": "test"}, worker_id="worker-a")
+        task = asyncio.run(self.scheduler.dequeue())
+        assert not self.scheduler.complete(task["id"], worker_id="worker-b")
+        assert self.scheduler.complete(task["id"], worker_id="worker-a")
+        assert not self.scheduler.complete(task["id"], worker_id="worker-a")
