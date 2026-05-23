@@ -153,3 +153,16 @@ class TestTaskScheduler:
 # 2026-01-12T16:53:28 update
 
 # 2026-04-16T16:58:23 update
+
+def test_schedule_uses_monotonic_time():
+    """Verify scheduled deadlines use monotonic clock so system
+    clock adjustments (NTP, DST) don't affect heartbeat timing."""
+    import asyncio
+    import time
+    scheduler = TaskScheduler()
+    task_id = scheduler.schedule({"type": "monotonic-test"}, delay=10.0)
+    now = time.monotonic()
+    scheduled_time = scheduler._scheduled[task_id]
+    assert scheduled_time > now, "Scheduled time should be in the future"
+    diff = scheduled_time - now
+    assert 8.0 <= diff <= 12.0, f"Expected ~10s offset, got {diff:.1f}s"
