@@ -2,7 +2,7 @@
 
 import time
 import logging
-from typing import Callable
+from typing import Callable, Dict, Optional, Set
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -10,12 +10,142 @@ from starlette.responses import Response
 logger = logging.getLogger(__name__)
 
 
+# Integration auth token store — tracks credential state for webhook management
+class IntegrationAuthStore:
+    """In-memory store for integration auth credential state.
+    
+    Tracks which API keys, tokens, or users have been disabled, revoked,
+    or have expired credentials. Used by AuthMiddleware to reject stale
+    credentials before any protected action is performed.
+    """
+    
+    def __init__(self):
+        self._disabled_users: Set[str] = set()
+        self._revoked_tokens: Set[str] = set()
+        self._expired_tokens: Dict[str, float] = {}
+    
+    def disable_user(self, user_id: str) -> None:
+        self._disabled_users.add(user_id)
+    
+    def enable_user(self, user_id: str) -> None:
+        self._disabled_users.discard(user_id)
+    
+    def is_user_disabled(self, user_id: str) -> bool:
+        return user_id in self._disabled_users
+    
+    def revoke_token(self, token_hash: str) -> None:
+        self._revoked_tokens.add(token_hash)
+    
+    def is_token_revoked(self, token_hash: str) -> bool:
+        return token_hash in self._revoked_tokens
+    
+    def set_token_expiry(self, token_hash: str, expiry: float) -> None:
+        self._expired_tokens[token_hash] = expiry
+    
+    def is_token_expired(self, token_hash: str) -> bool:
+        if token_hash in self._expired_tokens:
+            return time.time() > self._expired_tokens[token_hash]
+        return False
+    
+    def is_credential_valid(self, user_id: str, token_hash: str) -> bool:
+        """Check if a credential is fully valid: user enabled, token not revoked, token not expired."""
+        if self.is_user_disabled(user_id):
+            return False
+        if self.is_token_revoked(token_hash):
+            return False
+        if self.is_token_expired(token_hash):
+            return False
+        return True
+
+
+# Global integration auth store — shared across middleware instances
+integration_auth_store = IntegrationAuthStore()
+
+
+# Webhook management paths that require integration auth validation
+WEBHOOK_MANAGEMENT_PATHS = [
+    "/api/v2/webhooks",
+    "/api/v2/integrations/webhook",
+    "/api/v2/integrations",
+]
+
+
+def _is_webhook_management_path(path: str) -> bool:
+    """Check if the request path is a webhook management endpoint."""
+    for prefix in WEBHOOK_MANAGEMENT_PATHS:
+        if path.startswith(prefix):
+            return True
+    return False
+
+
+def _extract_user_id(token: str) -> Optional[str]:
+    """Extract user ID from a Bearer token.
+    
+    In a real system this would validate JWT claims or decode the token.
+    For this implementation, we parse a simple 'user:<user_id>' format
+    embedded in the token payload.
+    """
+    if not token:
+        return None
+    try:
+        parts = token.split(".")
+        if len(parts) >= 2:
+            import json as _json
+            padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
+            decoded = base64.urlsafe_b64decode(padded).decode("utf-8")
+            payload = _json.loads(decoded)
+            return payload.get("sub") or payload.get("user_id")
+    except Exception:
+        pass
+    return None
+
+
+def _hash_token(token: str) -> str:
+    """Create a consistent hash of a token for store lookups."""
+    import hashlib
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         if request.url.path.startswith("/api/v2") and request.url.path != "/api/v2/auth/token":
-            token = request.headers.get("Authorization", "")
-            if not token.startswith("Bearer "):
-                return Response(status_code=401, content="Unauthorized")
+            auth_header = request.headers.get("Authorization", "")
+            if not auth_header.startswith("Bearer "):
+                return Response(status_code=401, content="Unauthorized: Missing or malformed Authorization header")
+            
+            token = auth_header[len("Bearer "):]
+            
+            if _is_webhook_management_path(request.url.path):
+                user_id = _extract_user_id(token)
+                token_hash = _hash_token(token)
+                
+                if not user_id:
+                    return Response(
+                        status_code=401,
+                        content="Unauthorized: Invalid token — could not extract identity"
+                    )
+                
+                if integration_auth_store.is_user_disabled(user_id):
+                    logger.warning(f"Blocked webhook management request from disabled user: {user_id}")
+                    return Response(
+                        status_code=403,
+                        content="Forbidden: User account is disabled — webhook management access revoked"
+                    )
+                
+                if integration_auth_store.is_token_revoked(token_hash):
+                    logger.warning(f"Blocked webhook management request using revoked token for user: {user_id}")
+                    return Response(
+                        status_code=401,
+                        content="Unauthorized: Token has been revoked — request a new API key"
+                    )
+                
+                if integration_auth_store.is_token_expired(token_hash):
+                    logger.warning(f"Blocked webhook management request using expired token for user: {user_id}")
+                    return Response(
+                        status_code=401,
+                        content="Unauthorized: Token has expired — refresh your credentials"
+                    )
+        
         return await call_next(request)
 
 
@@ -177,3 +307,5 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 # 2026-03-27T12:58:53 update
 
 # 2026-05-12T17:19:36 update
+
+# 2026-05-24T17:30:00 update

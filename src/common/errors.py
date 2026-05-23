@@ -41,6 +41,24 @@ class ResourceExhaustedError(AgentOrchestratorError):
     def __init__(self, resource: str):
         super().__init__(f"Resource exhausted: {resource}")
 
+
+class DisabledUserError(AgentOrchestratorError):
+    """Raised when an action is attempted by a disabled user account."""
+    def __init__(self, user_id: str):
+        super().__init__(f"User account is disabled: {user_id}")
+
+
+class RevokedTokenError(AgentOrchestratorError):
+    """Raised when a revoked or expired token is used."""
+    def __init__(self, message: str = "Token is no longer valid — has been revoked or expired"):
+        super().__init__(message)
+
+
+class InsufficientScopeError(AgentOrchestratorError):
+    """Raised when a principal lacks the required scope for an operation."""
+    def __init__(self, required_scope: str):
+        super().__init__(f"Insufficient scope — requires: {required_scope}")
+
 # 2019-01-25T13:21:06 update
 
 # 2019-02-15T19:31:32 update
@@ -166,3 +184,5 @@ class ResourceExhaustedError(AgentOrchestratorError):
 # 2026-05-04T18:36:18 update
 
 # 2026-05-11T11:46:37 update
+
+# 2026-05-24T17:30:00 update
