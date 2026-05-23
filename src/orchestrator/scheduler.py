@@ -38,6 +38,14 @@ class TaskScheduler:
         self._max_retries = 3
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
+        # Reject malformed payloads — must be dict with required fields
+        if not isinstance(task, dict) or "payload" not in task:
+            self._log_validation_failure(task, "missing required 'payload' field")
+            raise ValueError("Job payload must contain a 'payload' field")
+        payload = task.get("payload", {})
+        if not isinstance(payload, dict):
+            self._log_validation_failure(task, "payload must be a dict")
+            raise ValueError("Job payload must be a dict")
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
@@ -77,9 +85,19 @@ class TaskScheduler:
         if task:
             task["retries"] += 1
             if task["retries"] < self._max_retries:
-                self.enqueue(task, queue, priority=task.get("priority", 0))
+                try:
+                    self.enqueue(task, queue, priority=task.get("priority", 0))
+                except ValueError:
+                    self._log_validation_failure(task, "skipped retry — payload still malformed")
+                    return False
                 return True
         return False
+
+    def _log_validation_failure(self, task, reason: str) -> None:
+        import logging
+        logger = logging.getLogger(__name__)
+        task_id = task.get("id", "unknown") if isinstance(task, dict) else "unknown"
+        logger.warning("Queue validation: task=%s reason=%s", task_id, reason)
 
 # 2019-04-25T08:37:12 update
 
