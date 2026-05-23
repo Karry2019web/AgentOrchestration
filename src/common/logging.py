@@ -1,10 +1,10 @@
-"""Structured logging configuration."""
+"""Structured logging configuration and audit trail."""
 
 import json
 import logging
 import sys
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Any
 
 
 class StructuredFormatter(logging.Formatter):
@@ -22,122 +22,66 @@ class StructuredFormatter(logging.Formatter):
         return json.dumps(log_entry)
 
 
+class AuditTrail:
+    """Records audit events for data access and operations."""
+
+    def __init__(self):
+        self._events: List[Dict[str, Any]] = []
+        self._logger = logging.getLogger("audit")
+
+    def record(
+        self,
+        action: str,
+        actor: str,
+        target_id: str,
+        target_type: str,
+        result: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        event = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "action": action,
+            "actor": actor,
+            "target_id": target_id,
+            "target_type": target_type,
+            "result": result,
+            "metadata": metadata or {},
+        }
+        self._events.append(event)
+        self._logger.info(json.dumps(event))
+        return event
+
+    def query(
+        self,
+        actor: Optional[str] = None,
+        target_type: Optional[str] = None,
+        action: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        results = self._events
+        if actor:
+            results = [e for e in results if e["actor"] == actor]
+        if target_type:
+            results = [e for e in results if e["target_type"] == target_type]
+        if action:
+            results = [e for e in results if e["action"] == action]
+        return results[-limit:]
+
+    def clear(self) -> None:
+        self._events.clear()
+
+
+audit = AuditTrail()
+
+
 def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
     handler = logging.StreamHandler(sys.stdout)
     if json_output:
         handler.setFormatter(StructuredFormatter())
     else:
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-    logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO), handlers=[handler])
-
-# 2019-01-14T10:37:21 update
-
-# 2019-01-15T13:20:32 update
-
-# 2019-01-22T12:39:53 update
-
-# 2019-04-24T12:23:11 update
-
-# 2019-05-30T17:23:20 update
-
-# 2019-07-23T19:29:50 update
-
-# 2019-07-29T17:21:51 update
-
-# 2019-11-07T14:37:43 update
-
-# 2020-01-21T19:13:41 update
-
-# 2020-02-26T12:41:16 update
-
-# 2020-04-15T10:31:15 update
-
-# 2020-06-04T08:55:59 update
-
-# 2020-10-20T14:20:45 update
-
-# 2020-11-04T12:47:37 update
-
-# 2021-01-03T20:18:44 update
-
-# 2021-08-16T09:55:15 update
-
-# 2021-08-17T15:31:20 update
-
-# 2021-09-03T19:42:47 update
-
-# 2021-09-14T20:55:49 update
-
-# 2021-11-05T14:29:30 update
-
-# 2021-12-10T20:38:38 update
-
-# 2021-12-15T09:54:55 update
-
-# 2022-01-21T11:34:19 update
-
-# 2022-02-22T14:21:14 update
-
-# 2022-03-10T16:21:41 update
-
-# 2022-05-07T09:03:51 update
-
-# 2022-05-25T12:20:13 update
-
-# 2022-07-14T14:40:31 update
-
-# 2022-08-19T18:48:52 update
-
-# 2022-09-13T11:52:44 update
-
-# 2022-12-27T14:07:35 update
-
-# 2023-01-18T15:30:02 update
-
-# 2023-03-13T19:28:57 update
-
-# 2023-03-17T11:11:13 update
-
-# 2023-06-29T18:28:49 update
-
-# 2023-07-05T13:48:03 update
-
-# 2023-07-13T15:11:45 update
-
-# 2023-08-28T19:47:24 update
-
-# 2023-09-27T14:54:40 update
-
-# 2024-03-22T16:35:48 update
-
-# 2024-03-29T13:12:53 update
-
-# 2024-04-12T08:46:35 update
-
-# 2024-06-20T13:40:26 update
-
-# 2024-06-21T19:45:50 update
-
-# 2024-10-22T12:19:06 update
-
-# 2024-12-16T20:22:05 update
-
-# 2025-03-11T10:59:04 update
-
-# 2025-03-21T09:30:03 update
-
-# 2025-04-07T13:19:33 update
-
-# 2025-05-28T17:14:26 update
-
-# 2025-07-04T16:31:31 update
-
-# 2025-08-19T09:35:13 update
-
-# 2026-02-11T08:41:53 update
-
-# 2026-03-02T08:30:19 update
-
-# 2026-03-12T14:07:42 update
-
-# 2026-05-07T18:02:06 update
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO), handlers=[handler]
+    )
