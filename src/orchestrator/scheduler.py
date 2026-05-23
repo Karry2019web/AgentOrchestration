@@ -2,9 +2,137 @@
 
 import asyncio
 import heapq
+import logging
 import time
 from typing import Any, Dict, Optional
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
+
+
+class VisibilityTimeoutError(Exception):
+    """Raised when a task's visibility deadline has expired."""
+    pass
+
+
+class VisibilityTimeoutManager:
+    """Manages visibility timeouts for in-flight tasks.
+
+    Each dequeued task gets a visibility deadline. The deadline can be
+    extended for long-running agents. If a task's deadline expires before
+    it is completed or failed, the task becomes eligible for re-delivery
+    to another worker.
+    """
+
+    def __init__(self, default_timeout: float = 30.0, max_extensions: int = 10):
+        self.default_timeout = default_timeout
+        self.max_extensions = max_extensions
+        self._deadlines: Dict[str, float] = {}
+        self._extensions: Dict[str, int] = {}
+        self._lease_holders: Dict[str, str] = {}
+
+    def claim(self, task_id: str, worker_id: str, timeout: Optional[float] = None) -> float:
+        """Claim a task with a fresh visibility deadline.
+
+        Args:
+            task_id: The task to claim.
+            worker_id: The claiming worker.
+            timeout: Visibility timeout in seconds (defaults to default_timeout).
+
+        Returns:
+            The deadline timestamp (Unix epoch seconds).
+        """
+        deadline = time.time() + (timeout or self.default_timeout)
+        self._deadlines[task_id] = deadline
+        self._extensions[task_id] = 0
+        self._lease_holders[task_id] = worker_id
+        logger.debug("Claimed task %s for worker %s until %.3f", task_id, worker_id, deadline)
+        return deadline
+
+    def extend(self, task_id: str, worker_id: str, extension: float = 30.0) -> float:
+        """Extend the visibility deadline for a long-running agent.
+
+        Args:
+            task_id: The task to extend.
+            worker_id: The worker requesting the extension.
+            extension: Additional seconds to extend (default 30s).
+
+        Returns:
+            The new deadline timestamp.
+
+        Raises:
+            VisibilityTimeoutError: If the task's deadline has already expired
+                or the worker does not hold the lease.
+        """
+        self._check_lease(task_id, worker_id)
+        if self._extensions.get(task_id, 0) >= self.max_extensions:
+            logger.warning("Task %s has reached max extensions (%d)", task_id, self.max_extensions)
+        self._extensions[task_id] = self._extensions.get(task_id, 0) + 1
+        new_deadline = time.time() + extension
+        self._deadlines[task_id] = new_deadline
+        logger.debug(
+            "Extended visibility for task %s to %.3f (extension %d/%d)",
+            task_id, new_deadline, self._extensions[task_id], self.max_extensions,
+        )
+        return new_deadline
+
+    def is_expired(self, task_id: str) -> bool:
+        """Check if a task's visibility deadline has passed."""
+        deadline = self._deadlines.get(task_id)
+        if deadline is None:
+            return True
+        return time.time() > deadline
+
+    def release(self, task_id: str, worker_id: str) -> None:
+        """Release a claimed task (on complete or fail).
+
+        Args:
+            task_id: The task to release.
+            worker_id: The worker releasing it.
+
+        Raises:
+            VisibilityTimeoutError: If the worker does not hold the lease.
+        """
+        self._check_lease(task_id, worker_id)
+        self._deadlines.pop(task_id, None)
+        self._extensions.pop(task_id, None)
+        self._lease_holders.pop(task_id, None)
+
+    def get_worker(self, task_id: str) -> Optional[str]:
+        """Return the worker that currently holds the lease for a task."""
+        return self._lease_holders.get(task_id)
+
+    def get_deadline(self, task_id: str) -> Optional[float]:
+        """Return the remaining deadline for the task."""
+        return self._deadlines.get(task_id)
+
+    def sweep_expired(self) -> list:
+        """Return all task IDs whose visibility deadlines have expired.
+
+        The caller should re-enqueue these tasks for re-delivery.
+        """
+        expired = [tid for tid, deadline in self._deadlines.items() if time.time() > deadline]
+        for tid in expired:
+            logger.info("Sweeping expired task %s for re-delivery", tid)
+            self._deadlines.pop(tid, None)
+            self._extensions.pop(tid, None)
+            self._lease_holders.pop(tid, None)
+        return expired
+
+    def _check_lease(self, task_id: str, worker_id: str) -> None:
+        holder = self._lease_holders.get(task_id)
+        if holder is None:
+            raise VisibilityTimeoutError(
+                f"Task {task_id} has no lease holder — it may have been re-claimed"
+            )
+        if holder != worker_id:
+            raise VisibilityTimeoutError(
+                f"Task {task_id} is leased by worker {holder}, not {worker_id}"
+            )
+        if self.is_expired(task_id):
+            raise VisibilityTimeoutError(
+                f"Task {task_id} visibility deadline has expired"
+            )
 
 
 class PriorityQueue:
@@ -31,11 +159,16 @@ class PriorityQueue:
 
 
 class TaskScheduler:
-    def __init__(self):
+    def __init__(self, default_visibility_timeout: float = 30.0, max_visibility_extensions: int = 10):
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
         self._max_retries = 3
+        self._worker_id = str(uuid4())
+        self._visibility = VisibilityTimeoutManager(
+            default_timeout=default_visibility_timeout,
+            max_extensions=max_visibility_extensions,
+        )
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
         task_id = str(uuid4())
@@ -46,12 +179,14 @@ class TaskScheduler:
         if queue not in self._queues:
             self._queues[queue] = PriorityQueue()
         self._queues[queue].push(task, priority)
+        logger.debug("Enqueued task %s on queue %s with priority %d", task_id, queue, priority)
         return task_id
 
     def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         self._scheduled[task_id] = time.time() + delay
+        logger.debug("Scheduled task %s with delay %.2fs on queue %s", task_id, delay, queue)
         return task_id
 
     async def dequeue(self, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
@@ -66,11 +201,26 @@ class TaskScheduler:
             task = self._queues[queue].pop()
             if task:
                 self._in_flight[task["id"]] = task
+                self._visibility.claim(task["id"], self._worker_id, timeout=timeout)
+                logger.debug("Dequeued task %s from queue %s", task["id"], queue)
                 return task
         return None
 
+    def extend_visibility(self, task_id: str, extension: float = 30.0) -> float:
+        """Extend the visibility timeout for a long-running task.
+
+        This allows long-running agents to keep processing without the
+        task being re-delivered to another worker.
+        """
+        return self._visibility.extend(task_id, self._worker_id, extension)
+
     def complete(self, task_id: str) -> bool:
-        return self._in_flight.pop(task_id, None) is not None
+        task = self._in_flight.pop(task_id, None)
+        if task:
+            self._visibility.release(task_id, self._worker_id)
+            logger.debug("Completed task %s", task_id)
+            return True
+        return False
 
     def fail(self, task_id: str, queue: str = "default") -> bool:
         task = self._in_flight.pop(task_id, None)
@@ -78,139 +228,16 @@ class TaskScheduler:
             task["retries"] += 1
             if task["retries"] < self._max_retries:
                 self.enqueue(task, queue, priority=task.get("priority", 0))
+                self._visibility.release(task_id, self._worker_id)
+                logger.debug("Failed task %s (retry %d/%d), re-enqueued", task_id, task["retries"], self._max_retries)
                 return True
+            else:
+                self._visibility.release(task_id, self._worker_id)
+                logger.warning("Task %s failed after %d retries, discarded", task_id, self._max_retries)
         return False
 
-# 2019-04-25T08:37:12 update
-
-# 2019-06-04T16:40:00 update
-
-# 2019-07-11T12:01:28 update
-
-# 2019-08-02T12:20:21 update
-
-# 2019-08-23T10:38:50 update
-
-# 2019-10-31T13:55:52 update
-
-# 2019-11-04T20:12:32 update
-
-# 2019-12-13T12:22:36 update
-
-# 2020-02-01T10:32:37 update
-
-# 2020-02-26T09:44:38 update
-
-# 2020-03-09T19:00:55 update
-
-# 2020-05-01T18:40:34 update
-
-# 2020-05-12T15:10:31 update
-
-# 2020-06-30T13:24:19 update
-
-# 2020-09-22T16:00:45 update
-
-# 2020-10-20T10:52:48 update
-
-# 2020-10-21T12:18:08 update
-
-# 2020-11-06T12:35:01 update
-
-# 2020-12-09T08:09:33 update
-
-# 2021-01-07T08:20:36 update
-
-# 2021-10-02T15:23:16 update
-
-# 2021-10-06T16:14:57 update
-
-# 2021-10-06T09:27:41 update
-
-# 2021-11-19T08:37:40 update
-
-# 2022-03-01T16:39:54 update
-
-# 2022-05-26T13:43:07 update
-
-# 2022-06-02T10:50:58 update
-
-# 2022-06-14T10:46:48 update
-
-# 2022-07-31T16:44:34 update
-
-# 2022-08-30T18:20:12 update
-
-# 2022-11-04T14:47:03 update
-
-# 2022-12-06T10:36:49 update
-
-# 2022-12-22T13:21:12 update
-
-# 2022-12-26T12:24:50 update
-
-# 2023-03-09T08:09:55 update
-
-# 2023-05-01T10:07:37 update
-
-# 2023-06-08T14:32:15 update
-
-# 2023-07-14T17:24:18 update
-
-# 2023-12-14T08:38:31 update
-
-# 2024-02-20T13:43:58 update
-
-# 2024-03-24T08:52:42 update
-
-# 2024-03-28T15:27:17 update
-
-# 2024-03-29T18:10:33 update
-
-# 2024-04-15T20:18:31 update
-
-# 2024-05-27T13:11:52 update
-
-# 2024-05-27T16:42:56 update
-
-# 2024-06-20T13:03:45 update
-
-# 2024-06-28T12:32:58 update
-
-# 2024-07-10T14:10:16 update
-
-# 2024-07-26T14:18:59 update
-
-# 2024-08-12T08:21:05 update
-
-# 2024-08-21T16:58:40 update
-
-# 2024-09-27T19:54:30 update
-
-# 2024-10-21T13:47:42 update
-
-# 2024-11-11T09:19:27 update
-
-# 2024-12-24T08:23:41 update
-
-# 2025-02-14T10:35:15 update
-
-# 2025-03-31T18:09:40 update
-
-# 2025-06-21T17:32:49 update
-
-# 2025-07-21T16:52:28 update
-
-# 2025-08-20T19:45:16 update
-
-# 2025-11-04T18:54:24 update
-
-# 2025-12-09T20:17:36 update
-
-# 2026-01-12T15:42:32 update
-
-# 2026-01-23T14:41:20 update
-
-# 2026-03-18T14:43:07 update
-
-# 2026-04-13T11:43:19 update
+    def get_in_flight_count(self) -> int:
+        return len(self._in_flight)
+
+    def get_visibility(self) -> VisibilityTimeoutManager:
+        return self._visibility
