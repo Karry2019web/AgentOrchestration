@@ -8,12 +8,6 @@ from typing import Any, Callable, Dict, Optional
 def task(name: Optional[str] = None, retries: int = 0, timeout: int = 300):
     """Decorator for marking a method as an agent task handler."""
     def decorator(func: Callable) -> Callable:
-        func.__task_config__ = {
-            "name": name or func.__name__,
-            "retries": retries,
-            "timeout": timeout,
-        }
-
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
             try:
@@ -24,6 +18,12 @@ def task(name: Optional[str] = None, retries: int = 0, timeout: int = 300):
                 return result
             except asyncio.TimeoutError:
                 raise TimeoutError(f"Task {name or func.__name__} timed out after {timeout}s")
+
+        wrapper.__task_config__ = {
+            "name": name or func.__name__,
+            "retries": retries,
+            "timeout": timeout,
+        }
 
         return wrapper
     return decorator
