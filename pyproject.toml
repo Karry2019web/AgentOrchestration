@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ao = "src.cli.main:cli"
+ao = "src.cli.main:main"
 
 [tool.uv]
 dev-dependencies = [
