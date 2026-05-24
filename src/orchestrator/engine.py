@@ -2,13 +2,153 @@
 
 import asyncio
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
+from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
 from src.agent import AgentRegistry, AgentStatus
 from src.orchestrator.scheduler import TaskScheduler
 
 logger = logging.getLogger(__name__)
+
+
+class LifecycleState(Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    ROLLING_BACK = "rolling_back"
+    CANCELLED = "cancelled"
+
+
+class ReducerTransition:
+    """Represents a single reducer/dispatch transition with lifecycle metadata."""
+
+    def __init__(
+        self,
+        entity_id: str,
+        from_state: LifecycleState,
+        to_state: LifecycleState,
+        attempt: int = 1,
+        revision: int = 1,
+    ):
+        self.entity_id = entity_id
+        self.from_state = from_state
+        self.to_state = to_state
+        self.attempt = attempt
+        self.revision = revision
+        self.timestamp = time.time()
+
+
+class TransitionError(Exception):
+    """Raised when a reducer transition is rejected by the error store guard."""
+
+
+class ReducerErrorStore:
+    """Guards reducer/dispatch transitions with attempt, revision, and lifecycle checks.
+
+    Rejects stale, duplicate, or policy-violating transitions before
+    they commit scheduler, routing, queue, or workflow state.
+    """
+
+    def __init__(self):
+        self._states: Dict[str, LifecycleState] = {}
+        self._attempts: Dict[str, int] = {}
+        self._revisions: Dict[str, int] = {}
+        self._errors: List[Dict[str, Any]] = []
+
+    def get_state(self, entity_id: str) -> LifecycleState:
+        return self._states.get(entity_id, LifecycleState.PENDING)
+
+    def get_attempt(self, entity_id: str) -> int:
+        return self._attempts.get(entity_id, 0)
+
+    def get_revision(self, entity_id: str) -> int:
+        return self._revisions.get(entity_id, 0)
+
+    def validate_transition(self, transition: ReducerTransition) -> bool:
+        """Validate a transition against stored lifecycle state."""
+        entity_id = transition.entity_id
+        current_state = self.get_state(entity_id)
+        current_attempt = self.get_attempt(entity_id)
+        current_revision = self.get_revision(entity_id)
+
+        if current_state == LifecycleState.COMPLETED and transition.to_state not in (
+            LifecycleState.PENDING, LifecycleState.ROLLING_BACK,
+        ):
+            raise TransitionError(
+                f"Cannot transition {entity_id} from {current_state.value} "
+                f"to {transition.to_state.value}: entity is already completed"
+            )
+
+        if current_state == LifecycleState.FAILED and transition.to_state not in (
+            LifecycleState.PENDING, LifecycleState.ROLLING_BACK,
+        ):
+            raise TransitionError(
+                f"Cannot transition {entity_id} from {current_state.value} "
+                f"to {transition.to_state.value}: entity is in failed state"
+            )
+
+        if current_state == LifecycleState.CANCELLED:
+            raise TransitionError(
+                f"Cannot transition {entity_id} from {current_state.value}: "
+                f"entity was cancelled"
+            )
+
+        if current_state == LifecycleState.ROLLING_BACK and transition.to_state != LifecycleState.PENDING:
+            raise TransitionError(
+                f"Cannot transition {entity_id} from {current_state.value} "
+                f"to {transition.to_state.value}: must complete rollback first"
+            )
+
+        if transition.attempt <= current_attempt:
+            raise TransitionError(
+                f"Stale attempt {transition.attempt} for {entity_id}: "
+                f"current attempt is {current_attempt}"
+            )
+
+        if transition.revision < current_revision:
+            raise TransitionError(
+                f"Stale revision {transition.revision} for {entity_id}: "
+                f"current revision is {current_revision}"
+            )
+
+        return True
+
+    def commit_transition(self, transition: ReducerTransition) -> None:
+        """Commit a validated transition to the error store."""
+        entity_id = transition.entity_id
+        self._states[entity_id] = transition.to_state
+        self._attempts[entity_id] = transition.attempt
+        if transition.revision > self._revisions.get(entity_id, 0):
+            self._revisions[entity_id] = transition.revision
+        logger.info(
+            "Reducer transition committed: %s %s -> %s (attempt=%d, revision=%d)",
+            entity_id, transition.from_state.value, transition.to_state.value,
+            transition.attempt, transition.revision,
+        )
+
+    def record_error(self, entity_id: str, transition_info: str, error: str) -> None:
+        """Record a rejected transition error for diagnostics."""
+        self._errors.append({
+            "entity_id": entity_id,
+            "transition_info": transition_info,
+            "error": error,
+            "timestamp": time.time(),
+        })
+        logger.warning("Reducer error recorded: %s — %s (%s)", entity_id, error, transition_info)
+
+    def get_errors(self, entity_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        if entity_id:
+            return [e for e in self._errors if e["entity_id"] == entity_id]
+        return list(self._errors)
+
+    def clear_errors(self, entity_id: Optional[str] = None) -> None:
+        if entity_id:
+            self._errors = [e for e in self._errors if e["entity_id"] != entity_id]
+        else:
+            self._errors.clear()
 
 
 class OrchestrationEngine:
@@ -19,11 +159,9 @@ class OrchestrationEngine:
         self.agent_timeout = agent_timeout
         self._running = False
         self._hooks: Dict[str, List[Callable]] = {
-            "pre_execute": [],
-            "post_execute": [],
-            "on_error": [],
-            "on_complete": [],
+            "pre_execute": [], "post_execute": [], "on_error": [], "on_complete": [],
         }
+        self.reducer_store = ReducerErrorStore()
 
     def register_hook(self, event: str, callback: Callable) -> None:
         if event in self._hooks:
@@ -47,6 +185,21 @@ class OrchestrationEngine:
         agent_id = task["target_agent"]
         logger.info(f"Executing task {task_id} on agent {agent_id}")
 
+        transition = ReducerTransition(
+            entity_id=task_id,
+            from_state=self.reducer_store.get_state(task_id),
+            to_state=LifecycleState.RUNNING,
+            attempt=self.reducer_store.get_attempt(task_id) + 1,
+            revision=self.reducer_store.get_revision(task_id) + 1,
+        )
+        try:
+            self.reducer_store.validate_transition(transition)
+            self.reducer_store.commit_transition(transition)
+        except TransitionError as e:
+            self.reducer_store.record_error(task_id, "pre_execute", str(e))
+            logger.error(f"Reducer rejected task {task_id} execution: {e}")
+            return
+
         for hook in self._hooks["pre_execute"]:
             await hook(task)
 
@@ -54,134 +207,40 @@ class OrchestrationEngine:
             agent = self.registry.get(agent_id)
             if not agent:
                 raise ValueError(f"Agent {agent_id} not found")
-
             self.registry.update_status(agent_id, AgentStatus.RUNNING)
             result = await asyncio.wait_for(
-                self._run_agent_task(agent, task),
-                timeout=self.agent_timeout,
+                self._run_agent_task(agent, task), timeout=self.agent_timeout,
             )
             self.registry.update_status(agent_id, AgentStatus.PAUSED)
-
             for hook in self._hooks["post_execute"]:
                 await hook(task, result)
-
             logger.info(f"Task {task_id} completed successfully")
 
+            complete_transition = ReducerTransition(
+                entity_id=task_id,
+                from_state=LifecycleState.RUNNING,
+                to_state=LifecycleState.COMPLETED,
+                attempt=transition.attempt,
+                revision=transition.revision,
+            )
+            self.reducer_store.commit_transition(complete_transition)
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}")
             for hook in self._hooks["on_error"]:
                 await hook(task, e)
+            error_transition = ReducerTransition(
+                entity_id=task_id,
+                from_state=self.reducer_store.get_state(task_id),
+                to_state=LifecycleState.FAILED,
+                attempt=transition.attempt,
+                revision=transition.revision,
+            )
+            self.reducer_store.commit_transition(error_transition)
+            self.reducer_store.record_error(task_id, "execution", str(e))
 
     async def _run_agent_task(self, agent: Dict, task: Dict) -> Any:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            self.executor,
-            self._execute_in_thread,
-            agent,
-            task,
-        )
+        return await loop.run_in_executor(self.executor, self._execute_in_thread, agent, task)
 
     def _execute_in_thread(self, agent: Dict, task: Dict) -> Any:
         return {"status": "completed", "output": f"Task {task['id']} processed by {agent['name']}"}
-
-# 2019-04-24T14:55:39 update
-
-# 2019-05-01T16:01:52 update
-
-# 2019-05-27T19:55:55 update
-
-# 2019-06-02T09:38:08 update
-
-# 2019-07-10T15:36:32 update
-
-# 2019-07-22T11:36:40 update
-
-# 2019-08-28T10:50:39 update
-
-# 2019-08-30T14:21:57 update
-
-# 2019-09-12T18:46:28 update
-
-# 2019-10-02T09:55:59 update
-
-# 2019-10-03T16:01:13 update
-
-# 2019-12-03T13:07:37 update
-
-# 2020-01-10T13:47:02 update
-
-# 2020-01-31T13:14:49 update
-
-# 2020-03-11T08:03:44 update
-
-# 2020-03-31T15:51:14 update
-
-# 2020-04-10T11:21:15 update
-
-# 2020-06-08T09:31:33 update
-
-# 2020-06-16T20:32:00 update
-
-# 2020-07-21T18:48:01 update
-
-# 2020-09-29T15:16:08 update
-
-# 2020-11-18T14:09:09 update
-
-# 2020-11-26T18:02:40 update
-
-# 2021-01-07T11:18:24 update
-
-# 2021-04-05T15:49:29 update
-
-# 2021-04-27T11:58:27 update
-
-# 2021-05-17T14:54:17 update
-
-# 2021-06-07T11:46:07 update
-
-# 2021-08-31T14:55:54 update
-
-# 2021-09-10T17:29:34 update
-
-# 2021-09-14T10:27:30 update
-
-# 2021-10-06T14:04:05 update
-
-# 2022-03-15T18:11:19 update
-
-# 2022-09-15T18:32:09 update
-
-# 2022-11-17T08:15:16 update
-
-# 2023-02-17T12:24:53 update
-
-# 2023-04-25T14:26:37 update
-
-# 2023-05-22T09:03:39 update
-
-# 2023-09-06T20:26:58 update
-
-# 2023-11-28T17:54:23 update
-
-# 2023-12-27T15:38:11 update
-
-# 2024-03-12T20:10:32 update
-
-# 2024-04-04T20:43:06 update
-
-# 2024-05-27T12:23:51 update
-
-# 2024-05-27T16:42:42 update
-
-# 2024-07-23T13:27:05 update
-
-# 2024-07-24T19:24:13 update
-
-# 2024-11-03T18:25:58 update
-
-# 2025-04-23T20:03:19 update
-
-# 2026-02-16T17:12:09 update
-
-# 2026-03-12T11:33:28 update
