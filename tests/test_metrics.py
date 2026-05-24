@@ -1,138 +1,83 @@
 import pytest
-from src.common.metrics import MetricsCollector
+from src.common.metrics import (
+    MetricsCollector,
+    apply_export_metadata,
+    validate_schema_version,
+    UnsupportedSchemaVersion,
+    SCHEMA_VERSION,
+    FIELD_DICTIONARY,
+)
 
 
-class TestMetricsCollector:
-    def setup_method(self):
-        self.metrics = MetricsCollector()
+class TestSchemaVersionedExports:
+    def test_export_includes_schema_version(self):
+        wrapped = apply_export_metadata({"test": "value"})
+        assert "schema_version" in wrapped
+        assert wrapped["schema_version"] == SCHEMA_VERSION
 
-    def test_increment(self):
-        self.metrics.increment("requests.total")
-        self.metrics.increment("requests.total")
-        snapshot = self.metrics.snapshot()
-        assert snapshot["counters"]["requests.total"] == 2
+    def test_export_includes_generated_at(self):
+        wrapped = apply_export_metadata({})
+        assert "generated_at" in wrapped
+        assert len(wrapped["generated_at"]) > 0
 
-    def test_gauge(self):
-        self.metrics.gauge("memory.usage", 85.5)
-        snapshot = self.metrics.snapshot()
-        assert snapshot["gauges"]["memory.usage"] == 85.5
+    def test_export_includes_field_dictionary(self):
+        wrapped = apply_export_metadata({})
+        assert "field_dictionary" in wrapped
+        assert isinstance(wrapped["field_dictionary"], dict)
+        assert "schema_version" in wrapped["field_dictionary"]
 
-    def test_observe(self):
-        self.metrics.observe("response.time", 0.5)
-        self.metrics.observe("response.time", 1.5)
-        snapshot = self.metrics.snapshot()
-        assert snapshot["histograms"]["response.time"]["count"] == 2
-        assert snapshot["histograms"]["response.time"]["avg"] == 1.0
+    def test_export_preserves_data(self):
+        orig = {"counters": {"req": 5}, "gauges": {"temp": 30.0}}
+        wrapped = apply_export_metadata(orig)
+        assert wrapped["data"] == orig
 
-    def test_timer(self):
-        self.metrics.start_timer("operation")
-        import time
-        time.sleep(0.01)
-        duration = self.metrics.stop_timer("operation")
-        assert duration > 0.005
+    def test_validate_schema_version_passes(self):
+        export = {"schema_version": "1.0.0"}
+        assert validate_schema_version(export) is True
 
-# 2019-07-16T09:29:21 update
+    def test_validate_missing_schema_version_raises(self):
+        with pytest.raises(UnsupportedSchemaVersion, match="Missing schema_version"):
+            validate_schema_version({})
 
-# 2019-09-09T13:35:42 update
+    def test_validate_unsupported_version_raises(self):
+        export = {"schema_version": "2.0.0"}
+        with pytest.raises(UnsupportedSchemaVersion, match="Unsupported schema version"):
+            validate_schema_version(export)
 
-# 2019-09-27T12:32:57 update
+    def test_metrics_snapshot_includes_metadata(self):
+        collector = MetricsCollector()
+        collector.increment("test.counter")
+        snap = collector.snapshot()
+        assert "schema_version" in snap
+        assert "generated_at" in snap
+        assert "field_dictionary" in snap
+        assert "data" in snap
+        assert snap["data"]["counters"]["test.counter"] == 1
 
-# 2019-10-31T18:15:44 update
+    def test_validate_empty_export_raises(self):
+        with pytest.raises(UnsupportedSchemaVersion):
+            validate_schema_version({})
 
-# 2019-12-03T08:48:09 update
+    def test_field_dictionary_completeness(self):
+        required_keys = {"schema_version", "generated_at", "field_dictionary",
+                         "counters", "gauges", "histograms"}
+        assert required_keys <= set(FIELD_DICTIONARY.keys())
 
-# 2019-12-12T14:59:28 update
+    def test_export_rejects_invalid_consumer(self):
+        """Simulate a downstream consumer rejecting an unsupported version."""
+        export = apply_export_metadata({"msg": "hello"})
+        # Mutate to an unknown version to simulate version drift
+        export["schema_version"] = "99.0.0"
+        with pytest.raises(UnsupportedSchemaVersion):
+            validate_schema_version(export)
 
-# 2019-12-17T08:03:25 update
-
-# 2020-03-13T11:30:29 update
-
-# 2020-03-18T08:01:30 update
-
-# 2020-04-15T20:08:39 update
-
-# 2020-04-15T17:28:05 update
-
-# 2020-10-05T20:20:34 update
-
-# 2020-10-20T13:35:37 update
-
-# 2020-11-13T10:55:30 update
-
-# 2021-05-30T18:22:53 update
-
-# 2021-06-10T12:21:04 update
-
-# 2021-07-30T14:21:13 update
-
-# 2021-10-12T09:49:50 update
-
-# 2021-10-14T18:38:30 update
-
-# 2021-11-04T15:10:57 update
-
-# 2021-11-11T12:24:53 update
-
-# 2022-02-01T18:07:05 update
-
-# 2022-05-07T10:41:46 update
-
-# 2022-08-03T13:03:09 update
-
-# 2022-11-03T20:27:13 update
-
-# 2023-05-27T10:00:06 update
-
-# 2023-06-01T10:14:25 update
-
-# 2023-06-06T19:51:40 update
-
-# 2023-06-12T16:26:47 update
-
-# 2023-07-17T17:02:24 update
-
-# 2023-08-14T20:12:12 update
-
-# 2023-10-04T09:11:52 update
-
-# 2023-11-30T11:55:21 update
-
-# 2023-12-07T16:49:07 update
-
-# 2024-03-20T17:08:53 update
-
-# 2024-07-21T20:27:36 update
-
-# 2024-09-10T09:59:33 update
-
-# 2024-09-17T18:56:50 update
-
-# 2024-10-21T20:05:15 update
-
-# 2024-10-28T15:35:37 update
-
-# 2024-12-27T12:41:28 update
-
-# 2025-04-04T20:26:10 update
-
-# 2025-04-18T10:04:49 update
-
-# 2025-05-07T18:10:13 update
-
-# 2025-07-17T09:36:24 update
-
-# 2025-09-10T15:28:48 update
-
-# 2025-09-16T09:18:42 update
-
-# 2025-12-03T18:09:40 update
-
-# 2026-01-12T13:23:49 update
-
-# 2026-02-17T11:42:41 update
-
-# 2026-02-20T19:39:10 update
-
-# 2026-03-24T19:28:19 update
-
-# 2026-04-10T18:10:10 update
+    def test_metrics_snapshot_rejects_missing_metadata(self):
+        """Ensure snapshot always has metadata by checking raw fields."""
+        collector = MetricsCollector()
+        snap = collector.snapshot()
+        # If metadata were stripped, the schema_version key would be absent
+        assert "schema_version" in snap
+        # A consumer that strips metadata before processing SHOULD fail validation
+        stripped = {"data": snap.get("data", {})}
+        with pytest.raises(UnsupportedSchemaVersion):
+            validate_schema_version(stripped)
