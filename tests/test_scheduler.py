@@ -36,120 +36,107 @@ class TestTaskScheduler:
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.fail(task["id"])
 
-# 2019-01-09T19:07:03 update
+    # --- Leader election tests ---
 
-# 2019-02-18T12:30:02 update
+    def test_leader_acquire(self):
+        s = TaskScheduler(instance_id="node-a")
+        assert s._acquire_leadership() is True
+        assert s._is_leader() is True
 
-# 2019-04-11T16:04:51 update
+    def test_leader_only_one(self):
+        s1 = TaskScheduler(instance_id="node-a")
+        s2 = TaskScheduler(instance_id="node-b")
+        # s1 acquires leadership
+        assert s1._acquire_leadership() is True
+        # s2 cannot acquire while s1 holds the lease
+        assert s2._acquire_leadership() is False
+        assert s2._is_leader() is False
 
-# 2019-04-17T16:25:46 update
+    def test_leader_release(self):
+        s = TaskScheduler(instance_id="node-a")
+        s._acquire_leadership()
+        assert s._is_leader() is True
+        s._release_leadership()
+        assert s._is_leader() is False
 
-# 2019-05-24T19:32:13 update
+    def test_leader_reacquire_after_expiry(self):
+        s1 = TaskScheduler(instance_id="node-a", lease_ttl=0.001)
+        s2 = TaskScheduler(instance_id="node-b", lease_ttl=0.001)
+        s1._acquire_leadership()
+        assert s1._is_leader() is True
+        # After lease expires, s2 can acquire
+        import time
+        time.sleep(0.005)
+        assert s2._acquire_leadership() is True
+        assert s1._is_leader() is False
+        assert s2._is_leader() is True
 
-# 2019-07-02T12:54:25 update
+    # --- Job deduplication tests ---
 
-# 2019-07-03T20:37:00 update
+    def test_register_job_as_leader(self):
+        s = TaskScheduler(instance_id="node-a")
+        s._acquire_leadership()
+        task_id = s.register_job("daily-cleanup", {"type": "cleanup"})
+        assert task_id is not None
+        assert "daily-cleanup" in s.list_registered_jobs()
 
-# 2019-08-21T19:37:17 update
+    def test_register_job_non_leader_returns_none(self):
+        s1 = TaskScheduler(instance_id="node-a")
+        s2 = TaskScheduler(instance_id="node-b")
+        s1._acquire_leadership()
+        # s2 is not the leader
+        task_id = s2.register_job("daily-cleanup", {"type": "cleanup"})
+        assert task_id is None
 
-# 2019-10-18T10:30:31 update
+    def test_register_duplicate_job_returns_none(self):
+        s = TaskScheduler(instance_id="node-a")
+        s._acquire_leadership()
+        first = s.register_job("daily-cleanup", {"type": "cleanup"})
+        second = s.register_job("daily-cleanup", {"type": "cleanup"})
+        assert first is not None
+        assert second is None  # Duplicate rejected
 
-# 2019-10-25T09:01:38 update
+    def test_register_different_jobs_both_accepted(self):
+        s = TaskScheduler(instance_id="node-a")
+        s._acquire_leadership()
+        id1 = s.register_job("daily-cleanup", {"type": "cleanup"})
+        id2 = s.register_job("hourly-report", {"type": "report"})
+        assert id1 is not None
+        assert id2 is not None
+        assert len(s.list_registered_jobs()) == 2
 
-# 2019-10-29T12:59:34 update
+    def test_unregister_job(self):
+        s = TaskScheduler(instance_id="node-a")
+        s._acquire_leadership()
+        s.register_job("daily-cleanup", {"type": "cleanup"})
+        assert s.unregister_job("daily-cleanup") is True
+        assert "daily-cleanup" not in s.list_registered_jobs()
 
-# 2019-11-05T10:07:06 update
+    def test_unregister_job_non_owner_fails(self):
+        s1 = TaskScheduler(instance_id="node-a")
+        s2 = TaskScheduler(instance_id="node-b")
+        s1._acquire_leadership()
+        s1.register_job("daily-cleanup", {"type": "cleanup"})
+        # s2 cannot unregister jobs it does not own
+        assert s2.unregister_job("daily-cleanup") is False
 
-# 2019-11-11T10:43:52 update
+    def test_rolling_deployment_simulation(self):
+        """Simulate rolling deployment scenario from the issue."""
+        old_scheduler = TaskScheduler(instance_id="old-v1")
+        new_scheduler = TaskScheduler(instance_id="new-v2")
 
-# 2020-01-17T13:40:02 update
+        # Old scheduler acquires leadership and registers jobs
+        old_scheduler._acquire_leadership()
+        old_id = old_scheduler.register_job("daily-cleanup", {"type": "cleanup"})
+        assert old_id is not None
 
-# 2020-02-07T14:06:34 update
+        # New scheduler comes online but cannot register the same job
+        new_id = new_scheduler.register_job("daily-cleanup", {"type": "cleanup"})
+        assert new_id is None  # Duplicate prevented
 
-# 2020-04-03T08:53:40 update
-
-# 2020-04-06T19:36:29 update
-
-# 2020-05-12T11:51:05 update
-
-# 2020-08-17T08:37:15 update
-
-# 2020-09-15T10:39:38 update
-
-# 2020-10-06T11:26:19 update
-
-# 2020-10-21T13:32:43 update
-
-# 2020-12-14T18:18:36 update
-
-# 2020-12-23T17:15:03 update
-
-# 2021-01-25T16:29:00 update
-
-# 2021-02-23T11:23:50 update
-
-# 2021-03-19T12:21:19 update
-
-# 2021-07-29T18:48:25 update
-
-# 2021-08-25T12:46:58 update
-
-# 2021-09-09T16:27:13 update
-
-# 2021-12-16T12:05:30 update
-
-# 2022-05-07T14:05:12 update
-
-# 2022-07-18T20:52:29 update
-
-# 2022-07-31T18:42:26 update
-
-# 2022-09-09T13:10:08 update
-
-# 2023-01-04T15:16:57 update
-
-# 2023-01-17T14:49:04 update
-
-# 2023-02-15T13:51:30 update
-
-# 2023-03-08T09:15:53 update
-
-# 2023-03-23T16:32:20 update
-
-# 2023-03-28T09:32:01 update
-
-# 2023-05-05T17:28:22 update
-
-# 2023-06-01T08:13:52 update
-
-# 2023-06-20T09:58:10 update
-
-# 2023-07-04T16:14:34 update
-
-# 2023-07-17T20:49:40 update
-
-# 2023-12-26T11:49:18 update
-
-# 2024-05-27T11:00:06 update
-
-# 2024-07-04T08:53:03 update
-
-# 2024-07-18T16:19:02 update
-
-# 2024-08-07T09:35:35 update
-
-# 2024-08-22T14:32:14 update
-
-# 2025-05-20T14:19:23 update
-
-# 2025-07-17T17:54:48 update
-
-# 2025-07-28T13:06:30 update
-
-# 2025-12-22T19:05:25 update
-
-# 2026-01-08T18:43:02 update
-
-# 2026-01-12T16:53:28 update
-
-# 2026-04-16T16:58:23 update
+        # Old scheduler lease expires, new scheduler takes over
+        old_scheduler._release_leadership()
+        new_scheduler._acquire_leadership()
+        new_id = new_scheduler.register_job("hourly-report", {"type": "report"})
+        assert new_id is not None
+        assert len(new_scheduler.list_registered_jobs()) == 1
