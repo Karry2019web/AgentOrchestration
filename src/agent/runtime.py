@@ -1,4 +1,4 @@
-"""Agent Runtime — Manages agent process lifecycle."""
+"""Agent Runtime — Manages agent process lifecycle with model routing fallback guard."""
 
 import os
 import signal
@@ -18,6 +18,52 @@ class RuntimeState(Enum):
     CRASHED = "crashed"
 
 
+class ModelMode(Enum):
+    """Supported model operation modes."""
+    CHAT = "chat"
+    COMPLETION = "completion"
+    EMBEDDING = "embedding"
+    RERANK = "rerank"
+    TOOLS = "tools"
+
+
+class UnsupportedModelModeError(Exception):
+    """Raised when a model mode is not supported and no fallback is configured."""
+    pass
+
+
+VALID_MODEL_MODES = {mode.value for mode in ModelMode}
+"""Set of all valid model mode strings."""
+
+DEFAULT_FALLBACK_MODE = ModelMode.CHAT.value
+"""Default fallback model mode when an unsupported mode is encountered."""
+
+
+def resolve_model_mode(mode: str) -> str:
+    """Resolve a model mode to a supported value, falling back to default.
+
+    Args:
+        mode: The requested model mode string.
+
+    Returns:
+        A supported model mode string. If the requested mode is unsupported,
+        logs a warning and returns the default fallback (chat).
+
+    Raises:
+        UnsupportedModelModeError: If the mode is unsupported and
+            strict validation is enabled (future use).
+    """
+    if mode in VALID_MODEL_MODES:
+        return mode
+
+    logger.warning(
+        "Unsupported model mode '%s' — falling back to '%s'",
+        mode,
+        DEFAULT_FALLBACK_MODE,
+    )
+    return DEFAULT_FALLBACK_MODE
+
+
 class AgentRuntime:
     def __init__(self):
         self._processes: Dict[str, subprocess.Popen] = {}
@@ -34,6 +80,11 @@ class AgentRuntime:
             process_env.update(env)
         process_env["AO_AGENT_ID"] = agent_id
 
+        # Resolve model mode from env, falling back to default
+        raw_mode = process_env.get("AO_MODEL_MODE", "")
+        resolved_mode = resolve_model_mode(raw_mode) if raw_mode else DEFAULT_FALLBACK_MODE
+        process_env["AO_MODEL_MODE"] = resolved_mode
+
         try:
             proc = subprocess.Popen(
                 command,
@@ -43,7 +94,7 @@ class AgentRuntime:
             )
             self._processes[agent_id] = proc
             self._states[agent_id] = RuntimeState.RUNNING
-            logger.info(f"Agent {agent_id} started (PID: {proc.pid})")
+            logger.info(f"Agent {agent_id} started (PID: {proc.pid}, mode: {resolved_mode})")
             return True
         except Exception as e:
             self._states[agent_id] = RuntimeState.CRASHED
@@ -196,3 +247,4 @@ class AgentRuntime:
 # 2026-02-06T16:29:56 update
 
 # 2026-04-02T10:52:38 update
+
