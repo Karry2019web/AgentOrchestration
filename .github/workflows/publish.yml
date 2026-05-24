@@ -1,0 +1,122 @@
+name: Publish Package
+
+on:
+  release:
+    types: [published]
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      skip_ref_check:
+        description: 'Skip protected ref check (override)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  check-protected-ref:
+    runs-on: ubuntu-latest
+    outputs:
+      is_protected: ${{ steps.check.outputs.is_protected }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check protected ref
+        id: check
+        run: |
+          SKIP="${{ github.event.inputs.skip_ref_check || 'false' }}"
+          if [ "$SKIP" = "true" ]; then
+            echo "is_protected=false" >> $GITHUB_OUTPUT
+            echo "⚠️  Skipping ref protection check via manual dispatch override (not allowed)"
+            exit 1
+          fi
+
+          TRIGGER="${{ github.event_name }}"
+          REF="${{ github.ref }}"
+          REF_TYPE="${{ github.ref_type }}"
+
+          echo "Trigger: $TRIGGER"
+          echo "Ref: $REF"
+          echo "Ref type: $REF_TYPE"
+
+          # Allow signed release tags
+          if [ "$REF_TYPE" = "tag" ] && echo "$REF" | grep -qE '^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+'; then
+            # Verify it's a release tag - check if tag is annotated/signed
+            TAG_NAME="${REF#refs/tags/}"
+            TAG_TYPE=$(git cat-file -t "$TAG_NAME" 2>/dev/null || echo "unknown")
+            echo "Tag type: $TAG_TYPE"
+            if [ "$TAG_TYPE" = "tag" ]; then
+              echo "is_protected=true" >> $GITHUB_OUTPUT
+              echo "✅  Signed release tag detected: $TAG_NAME"
+              exit 0
+            fi
+          fi
+
+          # Allow protected branches (main, master)
+          if [ "$REF_TYPE" = "branch" ]; then
+            BRANCH="${REF#refs/heads/}"
+            if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+              echo "is_protected=true" >> $GITHUB_OUTPUT
+              echo "✅  Protected branch detected: $BRANCH"
+              exit 0
+            fi
+          fi
+
+          echo "is_protected=false" >> $GITHUB_OUTPUT
+          echo "❌  Ref is not protected: $REF (ref_type=$REF_TYPE)"
+          exit 1
+      - name: Fail before auth
+        if: steps.check.outputs.is_protected != 'true'
+        run: |
+          echo "❌  Publishing from unprotected ref is blocked."
+          echo "    Only protected branches (main, master) or signed release tags (v*) are allowed."
+          exit 1
+
+  build:
+    needs: check-protected-ref
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Install dependencies
+        run: uv sync
+      - name: Build package
+        run: uv build
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: [check-protected-ref, build]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
