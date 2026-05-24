@@ -27,3 +27,7 @@ jobs:
         run: uv run pytest --cov=src tests/
       - name: Lint
         run: uv run flake8 src/ tests/
+      - name: Check Docker build context
+        run: |
+          chmod +x scripts/check-build-context.sh
+          ./scripts/check-build-context.sh --budget 100
