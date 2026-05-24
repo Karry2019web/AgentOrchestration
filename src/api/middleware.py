@@ -7,6 +7,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from src.common.auth import (
+    validate_worker_token,
+    AuthError,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -16,6 +21,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
             token = request.headers.get("Authorization", "")
             if not token.startswith("Bearer "):
                 return Response(status_code=401, content="Unauthorized")
+            try:
+                workspace_id = request.headers.get("X-Workspace-ID")
+                claims = validate_worker_token(
+                    token,
+                    required_scope="worker",
+                    workspace_id=workspace_id,
+                )
+                request.state.token_claims = claims
+            except AuthError as e:
+                return Response(status_code=401, content=str(e))
         return await call_next(request)
 
 
@@ -87,8 +102,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 # 2021-06-22T19:23:44 update
 
 # 2021-09-09T13:44:55 update
-
-# 2021-09-16T09:30:20 update
 
 # 2021-10-14T20:42:33 update
 
@@ -177,3 +190,5 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 # 2026-03-27T12:58:53 update
 
 # 2026-05-12T17:19:36 update
+
+# 2026-05-24T08:00:00Z update
