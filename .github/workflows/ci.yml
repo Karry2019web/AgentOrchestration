@@ -27,3 +27,5 @@ jobs:
         run: uv run pytest --cov=src tests/
       - name: Lint
         run: uv run flake8 src/ tests/
+      - name: Fixture lint
+        run: python scripts/lint_fixtures.py
