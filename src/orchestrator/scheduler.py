@@ -2,9 +2,14 @@
 
 import asyncio
 import heapq
+import logging
+import random
 import time
-from typing import Any, Dict, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 
 class PriorityQueue:
@@ -30,12 +35,84 @@ class PriorityQueue:
         return len(self._queue)
 
 
-class TaskScheduler:
+class ReconciliationAudit:
+    """Bounded audit record for reconciliation decisions."""
+
+    def __init__(self, max_entries: int = 100):
+        self._entries: List[Dict[str, Any]] = []
+        self._max_entries = max_entries
+
+    def record(self, decision: str, queue: str, task_count: int, reason: str) -> None:
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "decision": decision,
+            "queue": queue,
+            "task_count": task_count,
+            "reason": reason,
+        }
+        self._entries.append(entry)
+        if len(self._entries) > self._max_entries:
+            self._entries.pop(0)
+
+    def recent(self, limit: int = 10) -> List[Dict[str, Any]]:
+        return self._entries[-limit:]
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+class ClusterStartupGuard:
+    """Atomic state precondition — prevents duplicate or policy-violating
+    transitions during cluster startup."""
+
     def __init__(self):
+        self._started = False
+        self._started_at: Optional[float] = None
+        self._stagger_window: float = 5.0
+
+    def try_acquire(self) -> bool:
+        if self._started:
+            return False
+        self._started = True
+        self._started_at = time.time()
+        return True
+
+    def is_stable(self) -> bool:
+        if not self._started:
+            return False
+        return (time.time() - self._started_at) >= self._stagger_window
+
+    def reset(self) -> None:
+        self._started = False
+        self._started_at = None
+
+    @property
+    def elapsed(self) -> float:
+        if not self._started_at:
+            return 0.0
+        return time.time() - self._started_at
+
+
+class TaskScheduler:
+    def __init__(self, stagger_min: float = 1.0, stagger_max: float = 5.0):
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
         self._max_retries = 3
+        self._running = False
+        self._stagger_min = stagger_min
+        self._stagger_max = stagger_max
+        self._startup_guard = ClusterStartupGuard()
+        self._audit = ReconciliationAudit()
+        self._reconciliation_task: Optional[asyncio.Task] = None
+
+    @property
+    def audit(self) -> ReconciliationAudit:
+        return self._audit
+
+    @property
+    def startup_guard(self) -> ClusterStartupGuard:
+        return self._startup_guard
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
         task_id = str(uuid4())
@@ -58,9 +135,9 @@ class TaskScheduler:
         now = time.time()
         expired = [tid for tid, t in self._scheduled.items() if t <= now]
         for tid in expired:
-            task = self._scheduled.pop(tid)
-            if task:
-                self.enqueue(task, queue)
+            task_data = self._scheduled.pop(tid, None)
+            if task_data is not None:
+                self.enqueue(task_data, queue)
 
         if queue in self._queues and len(self._queues[queue]) > 0:
             task = self._queues[queue].pop()
@@ -77,140 +154,99 @@ class TaskScheduler:
         if task:
             task["retries"] += 1
             if task["retries"] < self._max_retries:
+                # Re-enqueue with backoff
+                backoff = 2 ** task["retries"]
+                task["_backoff_until"] = time.time() + backoff
                 self.enqueue(task, queue, priority=task.get("priority", 0))
                 return True
         return False
 
-# 2019-04-25T08:37:12 update
-
-# 2019-06-04T16:40:00 update
-
-# 2019-07-11T12:01:28 update
-
-# 2019-08-02T12:20:21 update
-
-# 2019-08-23T10:38:50 update
-
-# 2019-10-31T13:55:52 update
-
-# 2019-11-04T20:12:32 update
-
-# 2019-12-13T12:22:36 update
-
-# 2020-02-01T10:32:37 update
-
-# 2020-02-26T09:44:38 update
-
-# 2020-03-09T19:00:55 update
-
-# 2020-05-01T18:40:34 update
-
-# 2020-05-12T15:10:31 update
-
-# 2020-06-30T13:24:19 update
-
-# 2020-09-22T16:00:45 update
-
-# 2020-10-20T10:52:48 update
-
-# 2020-10-21T12:18:08 update
-
-# 2020-11-06T12:35:01 update
-
-# 2020-12-09T08:09:33 update
-
-# 2021-01-07T08:20:36 update
-
-# 2021-10-02T15:23:16 update
-
-# 2021-10-06T16:14:57 update
-
-# 2021-10-06T09:27:41 update
-
-# 2021-11-19T08:37:40 update
-
-# 2022-03-01T16:39:54 update
-
-# 2022-05-26T13:43:07 update
-
-# 2022-06-02T10:50:58 update
-
-# 2022-06-14T10:46:48 update
-
-# 2022-07-31T16:44:34 update
-
-# 2022-08-30T18:20:12 update
-
-# 2022-11-04T14:47:03 update
-
-# 2022-12-06T10:36:49 update
-
-# 2022-12-22T13:21:12 update
-
-# 2022-12-26T12:24:50 update
-
-# 2023-03-09T08:09:55 update
-
-# 2023-05-01T10:07:37 update
-
-# 2023-06-08T14:32:15 update
-
-# 2023-07-14T17:24:18 update
-
-# 2023-12-14T08:38:31 update
-
-# 2024-02-20T13:43:58 update
-
-# 2024-03-24T08:52:42 update
-
-# 2024-03-28T15:27:17 update
-
-# 2024-03-29T18:10:33 update
-
-# 2024-04-15T20:18:31 update
-
-# 2024-05-27T13:11:52 update
-
-# 2024-05-27T16:42:56 update
-
-# 2024-06-20T13:03:45 update
-
-# 2024-06-28T12:32:58 update
-
-# 2024-07-10T14:10:16 update
-
-# 2024-07-26T14:18:59 update
-
-# 2024-08-12T08:21:05 update
-
-# 2024-08-21T16:58:40 update
-
-# 2024-09-27T19:54:30 update
-
-# 2024-10-21T13:47:42 update
-
-# 2024-11-11T09:19:27 update
-
-# 2024-12-24T08:23:41 update
-
-# 2025-02-14T10:35:15 update
-
-# 2025-03-31T18:09:40 update
-
-# 2025-06-21T17:32:49 update
-
-# 2025-07-21T16:52:28 update
-
-# 2025-08-20T19:45:16 update
-
-# 2025-11-04T18:54:24 update
-
-# 2025-12-09T20:17:36 update
-
-# 2026-01-12T15:42:32 update
-
-# 2026-01-23T14:41:20 update
-
-# 2026-03-18T14:43:07 update
-
-# 2026-04-13T11:43:19 update
+    async def start_reconciliation(self) -> None:
+        """Start the staggered periodic reconciliation loop."""
+        if self._running:
+            logger.warning("Reconciliation already running")
+            return
+
+        if not self._startup_guard.try_acquire():
+            logger.warning("Startup guard already acquired — deferring reconciliation")
+            return
+
+        self._running = True
+        self._reconciliation_task = asyncio.create_task(self._reconciliation_loop())
+        logger.info("Reconciliation loop started with stagger window %.1fs",
+                     self._startup_guard._stagger_window)
+        self._audit.record(
+            decision="started",
+            queue="__system__",
+            task_count=sum(len(q) for q in self._queues.values()),
+            reason="reconciliation_loop_started"
+        )
+
+    async def stop_reconciliation(self) -> None:
+        """Stop the reconciliation loop."""
+        self._running = False
+        if self._reconciliation_task:
+            self._reconciliation_task.cancel()
+            self._reconciliation_task = None
+        logger.info("Reconciliation loop stopped")
+
+    async def _reconciliation_loop(self) -> None:
+        """Periodic reconciliation with staggered timing to avoid
+        thundering herd on cluster startup."""
+        cycle = 0
+        while self._running:
+            if not self._startup_guard.is_stable():
+                # Stagger phase — random delay within window
+                jitter = random.uniform(self._stagger_min, self._stagger_max)
+                logger.debug("Cluster startup phase — staggering %.2fs", jitter)
+                await asyncio.sleep(jitter)
+                continue
+
+            # Stable phase — fixed interval with bounded jitter
+            await self._reconcile_once(cycle)
+            cycle += 1
+            base_interval = 30.0  # seconds between reconciliation cycles
+            jitter = random.uniform(0, 5.0)
+            await asyncio.sleep(base_interval + jitter)
+
+    async def _reconcile_once(self, cycle: int) -> None:
+        """Single reconciliation pass with audit logging."""
+        now = time.time()
+
+        # 1. Promote expired scheduled tasks to queues
+        expired = [tid for tid, t in list(self._scheduled.items()) if t <= now]
+        promoted = 0
+        for tid in expired:
+            task_data = self._scheduled.pop(tid, None)
+            if task_data is not None:
+                self.enqueue(task_data, "default")
+                promoted += 1
+
+        # 2. Check for stale in-flight tasks (orphaned >60s)
+        stale = [tid for tid, t in list(self._in_flight.items())
+                 if t.get("enqueued_at", 0) < now - 60]
+        reclaimed = 0
+        for tid in stale:
+            task_data = self._in_flight.pop(tid, None)
+            if task_data:
+                task_data["retries"] = task_data.get("retries", 0) + 1
+                if task_data["retries"] < self._max_retries:
+                    self.enqueue(task_data, "default")
+                    reclaimed += 1
+
+        # 3. Audit record
+        total_queued = sum(len(q) for q in self._queues.values())
+        total_scheduled = len(self._scheduled)
+        total_in_flight = len(self._in_flight)
+
+        self._audit.record(
+            decision="reconcile",
+            queue="all",
+            task_count=total_queued + total_scheduled + total_in_flight,
+            reason=f"cycle={cycle} promoted={promoted} reclaimed={reclaimed} "
+                   f"queued={total_queued} scheduled={total_scheduled} in_flight={total_in_flight}"
+        )
+
+        if promoted > 0 or reclaimed > 0:
+            logger.info("Reconciliation cycle %d: promoted=%d reclaimed=%d",
+                        cycle, promoted, reclaimed)
