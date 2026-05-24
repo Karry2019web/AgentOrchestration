@@ -5,6 +5,7 @@ import sys
 
 from src.common.config import Config
 from src.common.logging import configure_logging
+from src.deploy.validator import WorkerResourceValidator, ValidationError
 
 
 def cli():
@@ -37,7 +38,22 @@ def cli():
     if args.command == "init":
         print(f"Initializing project: {args.name}")
     elif args.command == "deploy":
-        print(f"Deploying agent from manifest: {args.manifest}")
+        import json
+        try:
+            with open(args.manifest) as f:
+                manifest_data = json.load(f)
+            validator = WorkerResourceValidator()
+            validator.validate_dict(manifest_data)
+            print(f"Validated manifest: {args.manifest}")
+            print(f"Deploying {manifest_data.get('name', 'worker')}")
+        except ValidationError as e:
+            print("Deployment FAILED - resource validation errors:")
+            for err in e.errors:
+                print(f"  - {err}")
+            sys.exit(1)
+        except FileNotFoundError:
+            print(f"Manifest file not found: {args.manifest}")
+            sys.exit(1)
     elif args.command == "status":
         print("Checking agent status...")
     elif args.command == "logs":
