@@ -3,8 +3,26 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/**'
+      - 'pyproject.toml'
+      - 'Makefile'
+      - 'README.md'
+      - 'SECURITY.md'
+      - 'CONTRIBUTING.md'
   pull_request:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/**'
+      - 'pyproject.toml'
+      - 'Makefile'
+      - 'README.md'
+      - 'SECURITY.md'
+      - 'CONTRIBUTING.md'
 
 jobs:
   test:
@@ -27,3 +45,90 @@ jobs:
         run: uv run pytest --cov=src tests/
       - name: Lint
         run: uv run flake8 src/ tests/
+
+  validate-release:
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.pull_request.files.*.filename, 'pyproject.toml') ||
+      contains(github.event.pull_request.files.*.filename, 'Makefile') ||
+      contains(github.event.push.modified, 'pyproject.toml') ||
+      contains(github.event.push.modified, 'Makefile')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Install dependencies
+        run: uv sync
+      - name: Validate version consistency
+        run: |
+          VERSION=$(python -c "import tomllib; d=tomllib.load(open('pyproject.toml','rb')); print(d['project']['version'])")
+          echo "Package version: $VERSION"
+          if git describe --tags --exact-match HEAD 2>/dev/null; then
+            TAG=$(git describe --tags --exact-match HEAD)
+            echo "Git tag: $TAG"
+            if [ "v$VERSION" != "$TAG" ]; then
+              echo "ERROR: Tag $TAG does not match version v$VERSION in pyproject.toml"
+              exit 1
+            fi
+          fi
+      - name: Build package
+        run: uv build
+      - name: Validate build artifact
+        run: |
+          ls -la dist/
+          test -f dist/*.whl || { echo "No wheel found"; exit 1; }
+          test -f dist/*.tar.gz || { echo "No source dist found"; exit 1; }
+
+  path-filter-check:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate path filter coverage
+        run: |
+          COVERED_PATHS=(
+            "src/"
+            "tests/"
+            ".github/workflows/"
+            "pyproject.toml"
+            "Makefile"
+            "README.md"
+            "SECURITY.md"
+            "CONTRIBUTING.md"
+          )
+          WARNINGS=0
+          for path in "${COVERED_PATHS[@]}"; do
+            if grep -q "$path" .github/workflows/ci.yml; then
+              echo "✓ Covered: $path"
+            else
+              echo "⚠ MISSING: $path is not in path filters"
+              WARNINGS=$((WARNINGS + 1))
+            fi
+          done
+          echo ""
+          echo "--- Checking for untracked critical paths ---"
+          TRACKED_GLOBS=$(grep -oP "^\s+-\s+'\K[^']+" .github/workflows/ci.yml || true)
+          WALKED=$(find . -maxdepth 1 -not -name '.' -not -name '.git' -not -name '__pycache__' | sort)
+          for entry in $WALKED; do
+            entry="${entry#./}"
+            covered=false
+            while IFS= read -r glob; do
+              case "$entry" in
+                $glob) covered=true; break ;;
+              esac
+            done <<< "$TRACKED_GLOBS"
+            if [ "$covered" = false ] && [ -f "$entry" ]; then
+              echo "⚠ Untracked: $entry — consider adding to path filters or documenting as non-critical"
+              WARNINGS=$((WARNINGS + 1))
+            fi
+          done
+          echo ""
+          if [ $WARNINGS -gt 0 ]; then
+            echo "Found $WARNINGS issues — check warnings above."
+          else
+            echo "✓ All critical paths are covered by filters!"
+          fi
