@@ -1,7 +1,8 @@
 """Configuration management module."""
 
-import os
+import copy
 import json
+import os
 from typing import Any, Dict, Optional
 
 
@@ -30,7 +31,7 @@ class Config:
             if part not in current:
                 current[part] = {}
             current = current[part]
-        current[parts[-1]] = value
+        current[parts[-1]] = copy.deepcopy(value)
 
     def get(self, key: str, default: Any = None) -> Any:
         parts = key.split(".")
@@ -42,13 +43,15 @@ class Config:
                     return default
             else:
                 return default
+        if isinstance(current, dict):
+            return copy.deepcopy(current)
         return current
 
     def set(self, key: str, value: Any) -> None:
         self._set_nested(key, value)
 
     def to_dict(self) -> Dict:
-        return self._data
+        return copy.deepcopy(self._data)
 
 # 2019-03-14T15:29:32 update
 
@@ -128,6 +131,8 @@ class Config:
 
 # 2024-02-19T11:33:12 update
 
+# 2024-03-27T08:22:58 update
+
 # 2024-05-09T14:00:07 update
 
 # 2024-06-28T11:57:44 update
@@ -161,3 +166,4 @@ class Config:
 # 2026-02-06T14:54:33 update
 
 # 2026-04-10T20:09:37 update
+

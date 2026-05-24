@@ -32,6 +32,43 @@ class TestConfig:
         assert data["key1"] == "value1"
         assert data["key2"] == "value2"
 
+    def test_set_isolation_from_caller_dict(self):
+        config = Config()
+        nested = {"host": "localhost", "port": 5432}
+        config.set("database", nested)
+        nested["host"] = "evil"
+        retrieved = config.get("database")
+        assert retrieved["host"] == "localhost"
+
+    def test_to_dict_isolation_from_external_mutation(self):
+        config = Config()
+        config.set("app.theme", "dark")
+        data = config.to_dict()
+        data["app"] = {"theme": "light"}
+        assert config.get("app.theme") == "dark"
+
+    def test_get_isolation_from_external_mutation(self):
+        config = Config()
+        config.set("app.server", {"port": 8080})
+        retrieved = config.get("app.server")
+        retrieved["port"] = 9090
+        assert config.get("app.server.port") == 8080
+
+    def test_nested_dict_set_does_not_share_reference(self):
+        config = Config()
+        inner = {"x": 1}
+        config.set("outer.inner", inner)
+        inner["x"] = 999
+        assert config.get("outer.inner.x") == 1
+
+    def test_load_isolation(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text('{"data": {"items": [1, 2, 3]}}')
+        config = Config(str(config_file))
+        data = config.to_dict()
+        data["data"]["items"].append(4)
+        assert config.get("data.items") == [1, 2, 3]
+
 # 2019-02-01T18:58:35 update
 
 # 2019-07-31T13:45:15 update
@@ -98,6 +135,10 @@ class TestConfig:
 
 # 2024-03-27T08:22:58 update
 
+# 2024-05-09T14:00:07 update
+
+# 2024-06-28T11:57:44 update
+
 # 2024-07-03T09:52:12 update
 
 # 2024-07-18T12:14:11 update
@@ -109,6 +150,12 @@ class TestConfig:
 # 2024-09-17T19:00:45 update
 
 # 2024-09-25T08:04:43 update
+
+# 2024-10-09T08:26:36 update
+
+# 2024-11-28T15:26:38 update
+
+# 2024-12-04T19:45:11 update
 
 # 2024-12-10T14:49:57 update
 
@@ -135,3 +182,4 @@ class TestConfig:
 # 2026-02-11T19:28:37 update
 
 # 2026-04-17T10:00:53 update
+
