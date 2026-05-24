@@ -1,5 +1,6 @@
 import pytest
-from src.orchestrator.scheduler import TaskScheduler
+import time
+from src.orchestrator.scheduler import TaskScheduler, ExternalServiceHealthGate, ServiceHealth
 
 
 class TestTaskScheduler:
@@ -36,120 +37,154 @@ class TestTaskScheduler:
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.fail(task["id"])
 
-# 2019-01-09T19:07:03 update
 
-# 2019-02-18T12:30:02 update
+class TestExternalServiceHealthGate:
+    def test_register_service_defaults_healthy(self):
+        gate = ExternalServiceHealthGate()
+        gate.register_service("api-gateway")
+        assert gate.get_health("api-gateway") == ServiceHealth.HEALTHY
+        assert gate.can_dispatch("api-gateway") is True
 
-# 2019-04-11T16:04:51 update
+    def test_unreachable_service_blocks_dispatch(self):
+        gate = ExternalServiceHealthGate()
+        gate.register_service("database")
+        gate.update_health("database", ServiceHealth.UNREACHABLE)
+        assert gate.can_dispatch("database") is False
 
-# 2019-04-17T16:25:46 update
+    def test_degraded_service_blocks_dispatch(self):
+        gate = ExternalServiceHealthGate()
+        gate.register_service("cache")
+        gate.update_health("cache", ServiceHealth.DEGRADED)
+        assert gate.can_dispatch("cache") is False
 
-# 2019-05-24T19:32:13 update
+    def test_recovered_service_allows_dispatch(self):
+        gate = ExternalServiceHealthGate()
+        gate.register_service("queue")
+        gate.update_health("queue", ServiceHealth.UNREACHABLE)
+        assert gate.can_dispatch("queue") is False
+        gate.update_health("queue", ServiceHealth.HEALTHY)
+        assert gate.can_dispatch("queue") is True
 
-# 2019-07-02T12:54:25 update
+    def test_defer_task_when_service_unavailable(self):
+        gate = ExternalServiceHealthGate()
+        gate.register_service("external-api")
+        gate.update_health("external-api", ServiceHealth.UNREACHABLE)
+        task = {"id": "task-1", "type": "sync"}
+        result = gate.defer_task(task, "external-api")
+        assert result is True
+        assert gate.get_deferred_count("external-api") == 1
 
-# 2019-07-03T20:37:00 update
+    def test_recover_deferred_after_health_restored(self):
+        gate = ExternalServiceHealthGate()
+        gate.register_service("database")
+        gate.update_health("database", ServiceHealth.UNREACHABLE)
+        task = {"id": "task-db", "type": "query"}
+        gate.defer_task(task, "database")
+        gate.update_health("database", ServiceHealth.HEALTHY)
+        recovered = gate.recover_deferred("database")
+        assert len(recovered) == 1
+        assert recovered[0]["id"] == "task-db"
+        assert gate.get_deferred_count("database") == 0
 
-# 2019-08-21T19:37:17 update
+    def test_service_not_registered_defaults_healthy(self):
+        gate = ExternalServiceHealthGate()
+        assert gate.get_health("unknown-service") == ServiceHealth.HEALTHY
+        assert gate.can_dispatch("unknown-service") is True
 
-# 2019-10-18T10:30:31 update
+    def test_max_retry_exceeded_rejects_deferral(self):
+        gate = ExternalServiceHealthGate(max_retry_attempts=2)
+        gate.register_service("flaky-service")
+        gate.update_health("flaky-service", ServiceHealth.UNREACHABLE)
+        task = {"id": "flaky-1", "type": "retry"}
+        assert gate.defer_task(task, "flaky-service") is True
+        assert gate.defer_task(task, "flaky-service") is False
 
-# 2019-10-25T09:01:38 update
+    def test_recover_deferred_noop_on_no_recovery(self):
+        gate = ExternalServiceHealthGate()
+        gate.register_service("external-api")
+        gate.update_health("external-api", ServiceHealth.UNREACHABLE)
+        task = {"id": "t1", "type": "sync"}
+        gate.defer_task(task, "external-api")
+        recovered = gate.recover_deferred("external-api")
+        assert len(recovered) == 0
 
-# 2019-10-29T12:59:34 update
+    def test_deferred_count_total(self):
+        gate = ExternalServiceHealthGate()
+        gate.register_service("svc-a")
+        gate.register_service("svc-b")
+        gate.update_health("svc-a", ServiceHealth.UNREACHABLE)
+        gate.update_health("svc-b", ServiceHealth.UNREACHABLE)
+        gate.defer_task({"id": "a1"}, "svc-a")
+        gate.defer_task({"id": "a2"}, "svc-a")
+        gate.defer_task({"id": "b1"}, "svc-b")
+        assert gate.get_deferred_count() == 3
+        assert gate.get_deferred_count("svc-a") == 2
+        assert gate.get_deferred_count("svc-b") == 1
 
-# 2019-11-05T10:07:06 update
+    def test_should_recheck_after_interval(self):
+        gate = ExternalServiceHealthGate(check_interval=0.1)
+        gate.register_service("api")
+        gate._last_check["api"] = 0.0
+        assert gate.should_recheck("api") is True
+        gate._last_check["api"] = time.time()
+        assert gate.should_recheck("api") is False
+        time.sleep(0.15)
+        assert gate.should_recheck("api") is True
 
-# 2019-11-11T10:43:52 update
 
-# 2020-01-17T13:40:02 update
+class TestSchedulerWithHealthGate:
+    def test_schedule_defers_when_service_unavailable(self):
+        scheduler = TaskScheduler()
+        gate = scheduler.health_gate
+        gate.register_service("database")
+        gate.update_health("database", ServiceHealth.UNREACHABLE)
+        task_id = scheduler.schedule(
+            {"type": "db-backup"}, delay=0.1,
+            required_service="database"
+        )
+        assert task_id is not None
+        assert gate.get_deferred_count("database") == 1
 
-# 2020-02-07T14:06:34 update
+    def test_schedule_directly_when_service_healthy(self):
+        scheduler = TaskScheduler()
+        gate = scheduler.health_gate
+        gate.register_service("database")
+        task_id = scheduler.schedule(
+            {"type": "db-backup"}, delay=0.1,
+            required_service="database"
+        )
+        assert task_id is not None
+        assert gate.get_deferred_count("database") == 0
+        assert task_id in scheduler._scheduled
 
-# 2020-04-03T08:53:40 update
+    def test_dequeue_checks_health_and_defers(self):
+        scheduler = TaskScheduler()
+        gate = scheduler.health_gate
+        gate.register_service("external-api")
+        scheduler.enqueue({"type": "sync", "_required_service": "external-api"})
+        gate.update_health("external-api", ServiceHealth.UNREACHABLE)
+        import asyncio
+        task = asyncio.run(scheduler.dequeue())
+        assert task is None
+        assert gate.get_deferred_count("external-api") == 1
 
-# 2020-04-06T19:36:29 update
+    def test_schedule_without_service_works_normally(self):
+        scheduler = TaskScheduler()
+        task_id = scheduler.schedule({"type": "normal-task"}, delay=0.1)
+        assert task_id is not None
+        assert task_id in scheduler._scheduled
 
-# 2020-05-12T11:51:05 update
+    def test_health_gate_property_returns_instance(self):
+        scheduler = TaskScheduler()
+        assert isinstance(scheduler.health_gate, ExternalServiceHealthGate)
 
-# 2020-08-17T08:37:15 update
-
-# 2020-09-15T10:39:38 update
-
-# 2020-10-06T11:26:19 update
-
-# 2020-10-21T13:32:43 update
-
-# 2020-12-14T18:18:36 update
-
-# 2020-12-23T17:15:03 update
-
-# 2021-01-25T16:29:00 update
-
-# 2021-02-23T11:23:50 update
-
-# 2021-03-19T12:21:19 update
-
-# 2021-07-29T18:48:25 update
-
-# 2021-08-25T12:46:58 update
-
-# 2021-09-09T16:27:13 update
-
-# 2021-12-16T12:05:30 update
-
-# 2022-05-07T14:05:12 update
-
-# 2022-07-18T20:52:29 update
-
-# 2022-07-31T18:42:26 update
-
-# 2022-09-09T13:10:08 update
-
-# 2023-01-04T15:16:57 update
-
-# 2023-01-17T14:49:04 update
-
-# 2023-02-15T13:51:30 update
-
-# 2023-03-08T09:15:53 update
-
-# 2023-03-23T16:32:20 update
-
-# 2023-03-28T09:32:01 update
-
-# 2023-05-05T17:28:22 update
-
-# 2023-06-01T08:13:52 update
-
-# 2023-06-20T09:58:10 update
-
-# 2023-07-04T16:14:34 update
-
-# 2023-07-17T20:49:40 update
-
-# 2023-12-26T11:49:18 update
-
-# 2024-05-27T11:00:06 update
-
-# 2024-07-04T08:53:03 update
-
-# 2024-07-18T16:19:02 update
-
-# 2024-08-07T09:35:35 update
-
-# 2024-08-22T14:32:14 update
-
-# 2025-05-20T14:19:23 update
-
-# 2025-07-17T17:54:48 update
-
-# 2025-07-28T13:06:30 update
-
-# 2025-12-22T19:05:25 update
-
-# 2026-01-08T18:43:02 update
-
-# 2026-01-12T16:53:28 update
-
-# 2026-04-16T16:58:23 update
+    def test_recovered_deferred_tasks_available_via_gate(self):
+        scheduler = TaskScheduler()
+        gate = scheduler.health_gate
+        gate.register_service("queue")
+        gate.update_health("queue", ServiceHealth.UNREACHABLE)
+        scheduler.schedule({"type": "process-queue"}, delay=0.1, required_service="queue")
+        gate.update_health("queue", ServiceHealth.HEALTHY)
+        recovered = gate.recover_deferred("queue")
+        assert len(recovered) == 1
+        assert recovered[0]["type"] == "process-queue"
