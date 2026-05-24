@@ -1,9 +1,10 @@
 """API route definitions."""
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import List, Dict, Optional
 
 from src.agent import AgentRegistry, AgentStatus
+from src.api.trace_explorer import get_explorer, FilterDepthError, MAX_FILTER_DEPTH
 
 router = APIRouter()
 registry = AgentRegistry()
@@ -53,6 +54,48 @@ async def stop_agent(agent_id: str):
 @router.get("/agents/count")
 async def agent_count():
     return {"count": registry.count()}
+
+
+# --- Trace Explorer Routes ---
+
+
+@router.post("/traces/query")
+async def query_traces(
+    filters: Optional[Dict] = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+):
+    """Query execution traces with optional nested filter support.
+    
+    Filter nesting is limited to MAX_FILTER_DEPTH ({MAX_FILTER_DEPTH}) levels deep.
+    Supported operators: eq, neq, gt, gte, lt, lte, in, contains, and, or, not.
+    """
+    explorer = get_explorer()
+    try:
+        results = explorer.query(filters=filters, limit=limit, offset=offset)
+        return {"traces": results, "count": len(results)}
+    except FilterDepthError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@router.get("/traces/{trace_id}")
+async def get_trace(trace_id: str):
+    """Get a single trace by ID."""
+    explorer = get_explorer()
+    trace = explorer.get_by_id(trace_id)
+    if not trace:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return trace
+
+
+@router.post("/traces")
+async def record_trace(agent_id: str, trace: Dict):
+    """Record a new trace entry."""
+    explorer = get_explorer()
+    explorer.record(agent_id, trace)
+    return {"status": "recorded", "agent_id": agent_id}
 
 # 2019-03-18T11:10:18 update
 
@@ -191,3 +234,4 @@ async def agent_count():
 # 2026-04-09T20:30:37 update
 
 # 2026-05-13T11:36:25 update
+
