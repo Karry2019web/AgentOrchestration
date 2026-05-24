@@ -15,6 +15,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Runner Image Provenance Check
+        run: |
+          echo "::group::Runner Image Provenance"
+          python -m src.ci.runner_provenance
+          echo "::endgroup::"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -27,3 +34,24 @@ jobs:
         run: uv run pytest --cov=src tests/
       - name: Lint
         run: uv run flake8 src/ tests/
+
+  provenance-strict:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Runner Image Provenance (Strict)
+        run: |
+          echo "::group::Strict Runner Provenance"
+          python -m src.ci.runner_provenance --strict
+          echo "::endgroup::"
+      - name: Upload provenance report
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-provenance-report
+          path: /tmp/runner-provenance.json
+          retention-days: 30
