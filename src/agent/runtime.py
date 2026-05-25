@@ -24,6 +24,10 @@ class AgentRuntime:
         self._states: Dict[str, RuntimeState] = {}
 
     def start(self, agent_id: str, command: list, env: Optional[Dict] = None) -> bool:
+        if not command or len(command) == 0:
+            logger.error(f"Agent {agent_id}: empty command rejected")
+            raise ValueError(f"Command must be a non-empty list for agent {agent_id}")
+
         if agent_id in self._processes and self._processes[agent_id].poll() is None:
             logger.warning(f"Agent {agent_id} is already running")
             return False
