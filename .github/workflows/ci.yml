@@ -1,8 +1,14 @@
 name: CI
 
+concurrency:
+  group: ci-${{ github.ref_name }}
+  cancel-in-progress: ${{ !startsWith(github.ref_name, 'v') }}
+
 on:
   push:
     branches: [main, develop]
+    tags:
+      - 'v*'
   pull_request:
     branches: [main]
 

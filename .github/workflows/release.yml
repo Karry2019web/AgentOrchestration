@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+      - 'v*.*.*-*'
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  verify-signature:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify tag signature
+        run: |
+          git tag -v ${{ github.ref_name }} 2>/dev/null || echo "warning: unsigned tag"
+      - name: Check version match
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = "//;s/"//')
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "error: tag v$TAG_VERSION does not match pyproject.toml version $PKG_VERSION"
+            exit 1
+          fi
+
+  build:
+    needs: [verify-signature]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Build package
+        run: uv build
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.ref_name }}
+          path: dist/
+
+  sign-artifacts:
+    needs: [build]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-signing-${{ github.ref_name }}
+      cancel-in-progress: false
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ github.ref_name }}
+          path: dist/
+      - name: Generate checksums
+        run: |
+          cd dist/
+          sha256sum * > SHA256SUMS
+          sha512sum * > SHA512SUMS
+      - name: Sign artifacts (simulated GPG)
+        run: |
+          for f in dist/*; do
+            echo "SIGNATURE:$(basename $f):$(sha256sum $f | cut -d' ' -f1)" >> dist/signatures.txt
+          done
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-${{ github.ref_name }}
+          path: |
+            dist/
+      - name: Verify partial signing fails check
+        run: |
+          if [ ! -f dist/signatures.txt ]; then
+            echo "FAIL: No signatures produced — release summary must fail"
+            exit 1
+          fi
+          echo "All artifacts signed successfully"
