@@ -1,10 +1,13 @@
-"""Task Scheduler — Priority-based task queuing and dispatch."""
+"""Task Scheduler — Priority-based task queuing and dispatch with deletion gating."""
 
 import asyncio
 import heapq
+import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 
 class PriorityQueue:
@@ -31,13 +34,66 @@ class PriorityQueue:
 
 
 class TaskScheduler:
+    """Task scheduler with deletion-state gating.
+
+    The scheduler tracks deleted workflow IDs to prevent run creation
+    after a workflow has been removed — closing a deletion-race window
+    where stale requests could create orphan runs.
+    """
+
     def __init__(self):
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
         self._max_retries = 3
+        # Deletion-state tracking — set of workflow IDs that have been deleted.
+        self._deleted_workflows: Set[str] = set()
+        # Audit log for gated decisions.
+        self._audit_log: list = []
 
-    def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
+    # ---- Deletion gating ----
+
+    def mark_workflow_deleted(self, workflow_id: str) -> None:
+        """Record a workflow as deleted so future run creation is rejected."""
+        self._deleted_workflows.add(workflow_id)
+        self._audit_log.append({
+            "event": "workflow_deleted",
+            "workflow_id": workflow_id,
+            "timestamp": time.time(),
+        })
+        logger.info("Workflow %s marked deleted — run creation gated", workflow_id)
+
+    def is_workflow_deleted(self, workflow_id: str) -> bool:
+        """Return True if the workflow has been marked as deleted."""
+        return workflow_id in self._deleted_workflows
+
+    def _check_and_gate(self, workflow_id: str, context: str) -> bool:
+        """Check deletion gate and log the decision. Returns True if gated (rejected)."""
+        if self.is_workflow_deleted(workflow_id):
+            self._audit_log.append({
+                "event": "run_creation_rejected",
+                "workflow_id": workflow_id,
+                "context": context,
+                "timestamp": time.time(),
+            })
+            logger.warning(
+                "Run creation rejected for deleted workflow %s (context=%s)",
+                workflow_id, context,
+            )
+            return True
+        return False
+
+    def get_audit_log(self) -> list:
+        """Return bounded audit log of recent gate decisions."""
+        return list(self._audit_log)
+
+    # ---- Core operations ----
+
+    def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> Optional[str]:
+        workflow_id = task.get("workflow_id")
+        if workflow_id and self._check_and_gate(workflow_id, "enqueue"):
+            return None
+
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
@@ -48,7 +104,11 @@ class TaskScheduler:
         self._queues[queue].push(task, priority)
         return task_id
 
-    def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
+    def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> Optional[str]:
+        workflow_id = task.get("workflow_id")
+        if workflow_id and self._check_and_gate(workflow_id, "schedule"):
+            return None
+
         task_id = str(uuid4())
         task["id"] = task_id
         self._scheduled[task_id] = time.time() + delay
@@ -58,9 +118,9 @@ class TaskScheduler:
         now = time.time()
         expired = [tid for tid, t in self._scheduled.items() if t <= now]
         for tid in expired:
-            task = self._scheduled.pop(tid)
-            if task:
-                self.enqueue(task, queue)
+            task_ref = self._scheduled.pop(tid)
+            if task_ref:
+                self.enqueue(task_ref, queue)
 
         if queue in self._queues and len(self._queues[queue]) > 0:
             task = self._queues[queue].pop()
@@ -81,136 +141,9 @@ class TaskScheduler:
                 return True
         return False
 
-# 2019-04-25T08:37:12 update
-
-# 2019-06-04T16:40:00 update
-
-# 2019-07-11T12:01:28 update
-
-# 2019-08-02T12:20:21 update
-
-# 2019-08-23T10:38:50 update
-
-# 2019-10-31T13:55:52 update
-
-# 2019-11-04T20:12:32 update
-
-# 2019-12-13T12:22:36 update
-
-# 2020-02-01T10:32:37 update
-
-# 2020-02-26T09:44:38 update
-
-# 2020-03-09T19:00:55 update
-
-# 2020-05-01T18:40:34 update
-
-# 2020-05-12T15:10:31 update
-
-# 2020-06-30T13:24:19 update
-
-# 2020-09-22T16:00:45 update
-
-# 2020-10-20T10:52:48 update
-
-# 2020-10-21T12:18:08 update
-
-# 2020-11-06T12:35:01 update
-
-# 2020-12-09T08:09:33 update
-
-# 2021-01-07T08:20:36 update
-
-# 2021-10-02T15:23:16 update
-
-# 2021-10-06T16:14:57 update
-
-# 2021-10-06T09:27:41 update
-
-# 2021-11-19T08:37:40 update
-
-# 2022-03-01T16:39:54 update
-
-# 2022-05-26T13:43:07 update
-
-# 2022-06-02T10:50:58 update
-
-# 2022-06-14T10:46:48 update
-
-# 2022-07-31T16:44:34 update
-
-# 2022-08-30T18:20:12 update
-
-# 2022-11-04T14:47:03 update
-
-# 2022-12-06T10:36:49 update
-
-# 2022-12-22T13:21:12 update
-
-# 2022-12-26T12:24:50 update
-
-# 2023-03-09T08:09:55 update
-
-# 2023-05-01T10:07:37 update
-
-# 2023-06-08T14:32:15 update
-
-# 2023-07-14T17:24:18 update
-
-# 2023-12-14T08:38:31 update
-
-# 2024-02-20T13:43:58 update
-
-# 2024-03-24T08:52:42 update
-
-# 2024-03-28T15:27:17 update
-
-# 2024-03-29T18:10:33 update
-
-# 2024-04-15T20:18:31 update
-
-# 2024-05-27T13:11:52 update
-
-# 2024-05-27T16:42:56 update
-
-# 2024-06-20T13:03:45 update
-
-# 2024-06-28T12:32:58 update
-
-# 2024-07-10T14:10:16 update
-
-# 2024-07-26T14:18:59 update
-
-# 2024-08-12T08:21:05 update
-
-# 2024-08-21T16:58:40 update
-
-# 2024-09-27T19:54:30 update
-
-# 2024-10-21T13:47:42 update
-
-# 2024-11-11T09:19:27 update
-
-# 2024-12-24T08:23:41 update
-
-# 2025-02-14T10:35:15 update
-
-# 2025-03-31T18:09:40 update
-
-# 2025-06-21T17:32:49 update
-
-# 2025-07-21T16:52:28 update
-
-# 2025-08-20T19:45:16 update
-
-# 2025-11-04T18:54:24 update
-
-# 2025-12-09T20:17:36 update
-
-# 2026-01-12T15:42:32 update
-
-# 2026-01-23T14:41:20 update
-
-# 2026-03-18T14:43:07 update
-
-# 2026-04-13T11:43:19 update
+    # ---- Lifecycle ----
+
+    def clear_gates(self) -> None:
+        """Clear all deletion gates — used in tests."""
+        self._deleted_workflows.clear()
+        self._audit_log.clear()
