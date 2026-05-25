@@ -1,8 +1,16 @@
 """Workflow Manager — Defines and executes multi-step agent workflows."""
 
+from __future__ import annotations
+
+import logging
+from collections import defaultdict
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
+
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 
 class StepStatus(Enum):
@@ -25,13 +33,118 @@ class WorkflowStep:
         self.error: Optional[str] = None
 
 
+@dataclass
+class WorkflowNode:
+    """A node in a workflow DAG with explicit dependency declarations.
+
+    ``depends_on`` must list the **names** of nodes that must complete before
+    this node runs.  An empty list means the node has no prerequisites and
+    can be scheduled immediately (parallel with other root nodes).
+    """
+
+    name: str
+    handler: Callable
+    depends_on: List[str] = field(default_factory=list)
+    retries: int = 0
+    timeout: int = 300
+    id: str = field(default_factory=lambda: str(uuid4()))
+    status: StepStatus = StepStatus.PENDING
+    result: Any = None
+    error: Optional[str] = None
+
+    def __hash__(self) -> int:
+        return hash(self.id)
+
+
+class NodeDependencyError(ValueError):
+    """Raised when a workflow node has an invalid or implicit dependency."""
+
+
+class NodeDependencyValidator:
+    """Validates that workflow node dependencies are explicitly declared.
+
+    Prevents implicit dependency on declaration order by requiring every
+    dependency to be declared via ``depends_on``.  Nodes added sequentially
+    must declare their ordering or be treated as parallel-ready roots.
+    """
+
+    @staticmethod
+    def validate_nodes(nodes: List[WorkflowNode]) -> List[str]:
+        """Validate a list of nodes.  Return a list of error messages (empty = valid)."""
+        errors: List[str] = []
+        if not nodes:
+            return errors
+
+        name_map: Dict[str, WorkflowNode] = {}
+        for n in nodes:
+            if n.name in name_map:
+                errors.append(f"Duplicate node name: '{n.name}'")
+            name_map[n.name] = n
+
+        # 1. Check that all declared dependencies exist
+        for n in nodes:
+            for dep_name in n.depends_on:
+                if dep_name not in name_map:
+                    errors.append(
+                        f"Node '{n.name}' depends on unknown node '{dep_name}'"
+                    )
+
+        # 2. Detect implicit ordering: flag sequential nodes that may have
+        #    an undeclared ordering dependency
+        for i in range(len(nodes)):
+            for j in range(i + 1, len(nodes)):
+                a, b = nodes[i], nodes[j]
+                if a.name in b.depends_on or b.name in a.depends_on:
+                    continue
+                a_name_lower = a.name.lower()
+                b_name_lower = b.name.lower()
+                handler_repr = repr(a.handler) + repr(b.handler)
+                if a_name_lower in handler_repr.lower() and b_name_lower in handler_repr.lower():
+                    errors.append(
+                        f"Nodes '{a.name}' and '{b.name}' appear interdependent "
+                        f"(handler references suggest coupling) but neither declares "
+                        f"the dependency explicitly.  Add depends_on or refactor to "
+                        f"remove the implicit ordering."
+                    )
+
+        # 3. Check for cycles
+        adj: Dict[str, List[str]] = {n.name: list(n.depends_on) for n in nodes}
+        for n in nodes:
+            visited: Set[str] = set()
+            path: List[str] = []
+
+            def dfs(name: str) -> Optional[List[str]]:
+                if name in visited:
+                    return None
+                visited.add(name)
+                path.append(name)
+                for dep in adj.get(name, []):
+                    if dep in path:
+                        cycle_start = path.index(dep)
+                        return path[cycle_start:] + [dep]
+                    cycle = dfs(dep)
+                    if cycle:
+                        return cycle
+                path.pop()
+                return None
+
+            cycle = dfs(n.name)
+            if cycle:
+                errors.append(f"Circular dependency detected: {' -> '.join(cycle)}")
+                break
+
+        return errors
+
+
 class Workflow:
     def __init__(self, name: str, description: str = ""):
         self.id = str(uuid4())
         self.name = name
         self.description = description
         self.steps: List[WorkflowStep] = []
+        self.nodes: List[WorkflowNode] = []
         self._step_map: Dict[str, WorkflowStep] = {}
+        self._node_map: Dict[str, WorkflowNode] = {}
         self.status = StepStatus.PENDING
 
     def add_step(self, step: WorkflowStep) -> "Workflow":
@@ -41,6 +154,16 @@ class Workflow:
 
     def get_step(self, step_id: str) -> Optional[WorkflowStep]:
         return self._step_map.get(step_id)
+
+    def add_node(self, node: WorkflowNode) -> "Workflow":
+        """Add a node with explicit dependencies to the workflow DAG."""
+        self.nodes.append(node)
+        self._node_map[node.name] = node
+        return self
+
+    def get_node(self, name: str) -> Optional[WorkflowNode]:
+        """Look up a node by name."""
+        return self._node_map.get(name)
 
 
 class WorkflowManager:
@@ -66,6 +189,9 @@ class WorkflowManager:
         if not workflow:
             return False
 
+        if workflow.nodes:
+            return self._execute_dag(workflow)
+
         workflow.status = StepStatus.RUNNING
         for step in workflow.steps:
             step.status = StepStatus.RUNNING
@@ -82,114 +208,61 @@ class WorkflowManager:
         workflow.status = StepStatus.COMPLETED
         return True
 
-# 2019-03-27T19:58:07 update
+    def _execute_dag(self, workflow: Workflow) -> bool:
+        """Execute a DAG of nodes with explicit dependencies."""
+        errors = NodeDependencyValidator.validate_nodes(workflow.nodes)
+        if errors:
+            logger.error("Node dependency validation failed: %s", errors)
+            workflow.status = StepStatus.FAILED
+            return False
 
-# 2019-05-09T09:42:56 update
+        workflow.status = StepStatus.RUNNING
 
-# 2019-12-03T10:07:42 update
+        node_map = {n.name: n for n in workflow.nodes}
+        in_degree: Dict[str, int] = {n.name: len(n.depends_on) for n in workflow.nodes}
+        dependents: Dict[str, List[WorkflowNode]] = defaultdict(list)
+        for n in workflow.nodes:
+            for dep in n.depends_on:
+                dependents[dep].append(n)
 
-# 2020-01-16T18:43:28 update
+        ready = {n for n in workflow.nodes if in_degree[n.name] == 0}
 
-# 2020-03-20T10:40:15 update
+        while ready:
+            batch = list(ready)
+            ready.clear()
+            for node in batch:
+                node.status = StepStatus.RUNNING
+                try:
+                    result = node.handler()
+                    node.result = result
+                    node.status = StepStatus.COMPLETED
+                except Exception as e:
+                    node.error = str(e)
+                    node.status = StepStatus.FAILED
+                    workflow.status = StepStatus.FAILED
+                    return False
 
-# 2020-04-17T15:36:50 update
+                for dep_node in dependents.get(node.name, []):
+                    in_degree[dep_node.name] -= 1
+                    if in_degree[dep_node.name] == 0:
+                        ready.add(dep_node)
 
-# 2020-05-04T14:44:01 update
+        remaining = [n.name for n in workflow.nodes if n.status == StepStatus.PENDING]
+        if remaining:
+            logger.error("Unreachable nodes (possible cycle): %s", remaining)
+            workflow.status = StepStatus.FAILED
+            return False
 
-# 2020-06-16T13:17:31 update
+        workflow.status = StepStatus.COMPLETED
+        return True
 
-# 2020-08-05T17:00:24 update
 
-# 2020-09-04T08:29:23 update
-
-# 2020-09-09T17:52:02 update
-
-# 2020-10-23T10:57:44 update
-
-# 2020-12-05T20:55:47 update
-
-# 2021-01-15T19:23:40 update
-
-# 2021-02-03T20:43:12 update
-
-# 2021-03-16T12:26:47 update
-
-# 2021-04-20T14:33:28 update
-
-# 2021-10-14T15:03:32 update
-
-# 2021-10-21T17:24:55 update
-
-# 2021-11-16T17:01:08 update
-
-# 2021-11-22T09:51:21 update
-
-# 2021-12-21T16:15:47 update
-
-# 2022-03-23T16:52:27 update
-
-# 2022-12-21T09:25:50 update
-
-# 2023-01-09T09:55:25 update
-
-# 2023-01-13T11:06:15 update
-
-# 2023-01-26T11:00:59 update
-
-# 2023-02-23T08:56:54 update
-
-# 2023-05-17T08:07:16 update
-
-# 2023-06-06T17:09:34 update
-
-# 2023-06-13T10:35:28 update
-
-# 2023-08-24T20:36:06 update
-
-# 2023-10-30T19:10:13 update
-
-# 2024-01-02T08:27:25 update
-
-# 2024-01-24T12:13:15 update
-
-# 2024-02-08T13:35:49 update
-
-# 2024-05-07T16:09:24 update
-
-# 2024-05-11T09:48:46 update
-
-# 2024-05-21T19:25:41 update
-
-# 2024-06-05T12:00:30 update
-
-# 2024-06-25T09:40:26 update
-
-# 2024-09-17T13:49:39 update
-
-# 2024-10-14T17:39:35 update
-
-# 2024-11-27T20:14:35 update
-
-# 2024-12-25T19:31:41 update
-
-# 2025-01-16T13:15:09 update
-
-# 2025-02-05T14:06:59 update
-
-# 2025-02-17T20:55:11 update
-
-# 2025-04-30T19:36:53 update
-
-# 2025-07-17T10:14:40 update
-
-# 2025-08-29T12:13:15 update
-
-# 2025-09-03T13:51:11 update
-
-# 2025-09-19T16:08:24 update
-
-# 2025-11-27T08:38:12 update
-
-# 2026-01-27T13:23:38 update
-
-# 2026-01-28T11:22:50 update
+__all__ = [
+    "NodeDependencyError",
+    "NodeDependencyValidator",
+    "StepStatus",
+    "Workflow",
+    "WorkflowManager",
+    "WorkflowNode",
+    "WorkflowStep",
+]
