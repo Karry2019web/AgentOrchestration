@@ -1,5 +1,7 @@
+"""Tests for metrics collection and analytics publishing with anonymization validation."""
+
 import pytest
-from src.common.metrics import MetricsCollector
+from src.common.metrics import MetricsCollector, AnalyticsPublisher, AnalyticsPublishError
 
 
 class TestMetricsCollector:
@@ -31,108 +33,127 @@ class TestMetricsCollector:
         duration = self.metrics.stop_timer("operation")
         assert duration > 0.005
 
-# 2019-07-16T09:29:21 update
 
-# 2019-09-09T13:35:42 update
+class TestAnalyticsPublisher:
+    def setup_method(self):
+        self.publisher = AnalyticsPublisher(min_group_size=5)
 
-# 2019-09-27T12:32:57 update
+    def test_publish_above_threshold(self):
+        """Groups at or above the minimum size are published successfully."""
+        group = {
+            "group_id": "workspace_alpha",
+            "group_size": 10,
+            "metrics": {"total_tasks": 42, "avg_duration": 3.5},
+        }
+        result = self.publisher.publish(group)
+        assert result["group_id"] == "workspace_alpha"
+        assert result["group_size"] == 10
+        assert result["metrics"]["total_tasks"] == 42
 
-# 2019-10-31T18:15:44 update
+    def test_publish_at_threshold(self):
+        """Groups exactly at minimum size are published."""
+        group = {
+            "group_id": "workspace_beta",
+            "group_size": 5,
+            "metrics": {"total_tasks": 15},
+        }
+        result = self.publisher.publish(group)
+        assert result["group_size"] == 5
 
-# 2019-12-03T08:48:09 update
+    def test_publish_below_threshold_raises(self):
+        """Groups below the minimum size are rejected."""
+        group = {
+            "group_id": "workspace_gamma",
+            "group_size": 2,
+            "metrics": {"total_tasks": 7},
+        }
+        with pytest.raises(AnalyticsPublishError) as exc_info:
+            self.publisher.publish(group)
+        assert "workspace_gamma" in str(exc_info.value)
+        assert "2" in str(exc_info.value)
+        assert "5" in str(exc_info.value)
 
-# 2019-12-12T14:59:28 update
+    def test_publish_empty_group(self):
+        """Groups with zero size are always rejected."""
+        group = {
+            "group_id": "workspace_empty",
+            "group_size": 0,
+            "metrics": {},
+        }
+        with pytest.raises(AnalyticsPublishError):
+            self.publisher.publish(group)
 
-# 2019-12-17T08:03:25 update
+    def test_publish_single_entity_group(self):
+        """A single-entity group is rejected (re-identification risk)."""
+        group = {
+            "group_id": "workspace_solo",
+            "group_size": 1,
+            "metrics": {"total_tasks": 3},
+        }
+        with pytest.raises(AnalyticsPublishError):
+            self.publisher.publish(group)
 
-# 2020-03-13T11:30:29 update
+    def test_publish_batch_all_valid(self):
+        """Batch publish with all groups above threshold."""
+        groups = [
+            {"group_id": "a", "group_size": 10, "metrics": {"x": 1}},
+            {"group_id": "b", "group_size": 20, "metrics": {"x": 2}},
+        ]
+        result = self.publisher.publish_batch(groups)
+        assert result["published_count"] == 2
+        assert result["suppressed_count"] == 0
+        assert len(result["suppressed"]) == 0
 
-# 2020-03-18T08:01:30 update
+    def test_publish_batch_mixed(self):
+        """Batch publish with some groups below threshold."""
+        groups = [
+            {"group_id": "large", "group_size": 100, "metrics": {"x": 10}},
+            {"group_id": "small", "group_size": 2, "metrics": {"x": 1}},
+            {"group_id": "medium", "group_size": 7, "metrics": {"x": 5}},
+        ]
+        result = self.publisher.publish_batch(groups)
+        assert result["published_count"] == 2
+        assert result["suppressed_count"] == 1
+        assert "small" in result["suppressed"]
+        assert "large" not in result["suppressed"]
 
-# 2020-04-15T20:08:39 update
+    def test_publish_batch_all_below(self):
+        """Batch publish with all groups below threshold."""
+        groups = [
+            {"group_id": "tiny", "group_size": 1, "metrics": {"x": 1}},
+            {"group_id": "small", "group_size": 3, "metrics": {"x": 2}},
+        ]
+        result = self.publisher.publish_batch(groups)
+        assert result["published_count"] == 0
+        assert result["suppressed_count"] == 2
 
-# 2020-04-15T17:28:05 update
+    def test_custom_min_group_size(self):
+        """Publisher can be configured with a custom minimum group size."""
+        publisher = AnalyticsPublisher(min_group_size=3)
+        assert publisher.min_group_size == 3
 
-# 2020-10-05T20:20:34 update
+        # Below custom threshold
+        group = {"group_id": "g", "group_size": 2, "metrics": {}}
+        with pytest.raises(AnalyticsPublishError):
+            publisher.publish(group)
 
-# 2020-10-20T13:35:37 update
+        # At custom threshold
+        group = {"group_id": "g", "group_size": 3, "metrics": {}}
+        result = publisher.publish(group)
+        assert result["group_size"] == 3
 
-# 2020-11-13T10:55:30 update
+    def test_suppressed_groups_not_exposed(self):
+        """Suppressed groups are reported by ID only, without exposing their metrics."""
+        groups = [
+            {"group_id": "exposed", "group_size": 10, "metrics": {"secret_data": "should_appear"}},
+            {"group_id": "hidden", "group_size": 1, "metrics": {"secret_data": "should_not_leak"}},
+        ]
+        result = self.publisher.publish_batch(groups)
+        assert "hidden" in result["suppressed"]
+        # Suppressed list only contains IDs, not the full group data
+        assert all(isinstance(s, str) for s in result["suppressed"])
+        # Published groups retain their metrics
+        published_ids = [p["group_id"] for p in result["published"]]
+        assert "exposed" in published_ids
+        assert "hidden" not in published_ids
 
-# 2021-05-30T18:22:53 update
-
-# 2021-06-10T12:21:04 update
-
-# 2021-07-30T14:21:13 update
-
-# 2021-10-12T09:49:50 update
-
-# 2021-10-14T18:38:30 update
-
-# 2021-11-04T15:10:57 update
-
-# 2021-11-11T12:24:53 update
-
-# 2022-02-01T18:07:05 update
-
-# 2022-05-07T10:41:46 update
-
-# 2022-08-03T13:03:09 update
-
-# 2022-11-03T20:27:13 update
-
-# 2023-05-27T10:00:06 update
-
-# 2023-06-01T10:14:25 update
-
-# 2023-06-06T19:51:40 update
-
-# 2023-06-12T16:26:47 update
-
-# 2023-07-17T17:02:24 update
-
-# 2023-08-14T20:12:12 update
-
-# 2023-10-04T09:11:52 update
-
-# 2023-11-30T11:55:21 update
-
-# 2023-12-07T16:49:07 update
-
-# 2024-03-20T17:08:53 update
-
-# 2024-07-21T20:27:36 update
-
-# 2024-09-10T09:59:33 update
-
-# 2024-09-17T18:56:50 update
-
-# 2024-10-21T20:05:15 update
-
-# 2024-10-28T15:35:37 update
-
-# 2024-12-27T12:41:28 update
-
-# 2025-04-04T20:26:10 update
-
-# 2025-04-18T10:04:49 update
-
-# 2025-05-07T18:10:13 update
-
-# 2025-07-17T09:36:24 update
-
-# 2025-09-10T15:28:48 update
-
-# 2025-09-16T09:18:42 update
-
-# 2025-12-03T18:09:40 update
-
-# 2026-01-12T13:23:49 update
-
-# 2026-02-17T11:42:41 update
-
-# 2026-02-20T19:39:10 update
-
-# 2026-03-24T19:28:19 update
-
-# 2026-04-10T18:10:10 update

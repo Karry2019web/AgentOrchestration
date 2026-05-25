@@ -1,9 +1,12 @@
-"""Metrics collection and reporting."""
+"""Metrics collection and analytics publishing with anonymization validation."""
 
+import logging
 import time
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Optional, Any
 from threading import Lock
+
+logger = logging.getLogger(__name__)
 
 
 class MetricsCollector:
@@ -50,142 +53,86 @@ class MetricsCollector:
 
 metrics = MetricsCollector()
 
-# 2019-01-01T14:07:11 update
 
-# 2019-02-19T09:42:37 update
+class AnalyticsPublishError(Exception):
+    """Raised when analytics metric publication fails validation."""
+    pass
+
+
+class AnalyticsPublisher:
+    """Publishes aggregated metrics to an analytics warehouse with anonymization validation.
+
+    Enforces minimum group-size thresholds before publishing to prevent
+    re-identification of individual workspaces or tasks through aggregate data.
+    """
+
+    def __init__(self, min_group_size: int = 5):
+        self._min_group_size = min_group_size
+
+    @property
+    def min_group_size(self) -> int:
+        return self._min_group_size
+
+    def publish(self, metric_group: Dict[str, Any]) -> Dict[str, Any]:
+        """Publish a metric group after validating anonymization thresholds.
+
+        Args:
+            metric_group: A dict with keys:
+                - "group_id": str — identifier for the metric group
+                - "group_size": int — number of entities aggregated in this group
+                - "metrics": dict — the aggregated metric values
+
+        Returns:
+            The validated metric group as published.
+
+        Raises:
+            AnalyticsPublishError: If the group size is below the minimum threshold.
+        """
+        group_size = metric_group.get("group_size", 0)
+        group_id = metric_group.get("group_id", "unknown")
+
+        if group_size < self._min_group_size:
+            logger.warning(
+                "Analytics publish blocked for group %s: size %d below minimum %d",
+                group_id, group_size, self._min_group_size,
+            )
+            raise AnalyticsPublishError(
+                f"Group '{group_id}' size ({group_size}) below anonymity threshold ({self._min_group_size})"
+            )
+
+        logger.info(
+            "Analytics published for group %s: size %d meets threshold %d",
+            group_id, group_size, self._min_group_size,
+        )
+        return dict(metric_group)
+
+    def publish_batch(self, metric_groups: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Publish multiple metric groups, suppressing groups below threshold.
+
+        Args:
+            metric_groups: List of metric group dicts.
+
+        Returns:
+            Dict with keys:
+                - "published": list of successfully published groups
+                - "suppressed": list of group IDs that were below the anonymity threshold
+                - "suppressed_count": int
+                - "published_count": int
+        """
+        published = []
+        suppressed = []
+
+        for group in metric_groups:
+            try:
+                result = self.publish(group)
+                published.append(result)
+            except AnalyticsPublishError:
+                suppressed.append(group.get("group_id", "unknown"))
+
+        return {
+            "published": published,
+            "suppressed": suppressed,
+            "suppressed_count": len(suppressed),
+            "published_count": len(published),
+        }
 
-# 2019-02-20T11:46:45 update
-
-# 2019-03-19T17:25:17 update
-
-# 2019-05-16T12:48:17 update
-
-# 2019-06-20T11:04:52 update
-
-# 2019-06-26T17:33:14 update
-
-# 2019-08-12T17:10:36 update
-
-# 2019-09-05T16:31:08 update
-
-# 2019-09-16T12:13:09 update
-
-# 2019-10-03T16:54:10 update
-
-# 2019-11-09T14:31:15 update
-
-# 2019-12-04T10:29:27 update
-
-# 2020-02-28T17:05:55 update
-
-# 2020-03-11T18:08:46 update
-
-# 2020-04-15T15:24:15 update
-
-# 2020-08-05T14:37:18 update
-
-# 2020-08-07T15:39:54 update
-
-# 2020-10-23T08:52:37 update
-
-# 2020-11-02T14:44:36 update
-
-# 2020-11-11T10:56:55 update
-
-# 2020-11-25T14:04:17 update
-
-# 2021-03-08T08:49:42 update
-
-# 2021-03-17T16:07:48 update
-
-# 2021-06-11T15:34:00 update
-
-# 2021-06-28T20:31:01 update
-
-# 2021-07-14T18:16:02 update
-
-# 2021-08-30T09:47:24 update
-
-# 2021-10-19T13:43:46 update
-
-# 2021-10-21T16:07:56 update
-
-# 2021-12-27T08:18:40 update
-
-# 2022-03-09T16:48:09 update
-
-# 2022-03-29T10:51:15 update
-
-# 2022-05-19T09:07:00 update
-
-# 2022-06-08T15:24:11 update
-
-# 2022-08-17T08:23:02 update
-
-# 2022-08-20T16:37:39 update
-
-# 2022-12-07T15:19:57 update
-
-# 2022-12-26T11:59:00 update
-
-# 2023-01-26T20:15:04 update
-
-# 2023-02-01T10:10:52 update
-
-# 2023-05-04T11:13:12 update
-
-# 2023-07-06T08:27:57 update
-
-# 2023-07-24T12:34:13 update
-
-# 2023-08-31T15:00:03 update
-
-# 2023-09-16T20:55:20 update
-
-# 2023-12-08T16:55:55 update
-
-# 2024-01-04T15:47:36 update
-
-# 2024-01-05T14:46:16 update
-
-# 2024-04-08T10:08:30 update
-
-# 2024-04-08T20:31:02 update
-
-# 2024-08-13T17:18:11 update
-
-# 2024-09-13T08:11:06 update
-
-# 2024-12-06T11:42:59 update
-
-# 2025-02-03T11:41:46 update
-
-# 2025-03-22T09:28:10 update
-
-# 2025-04-06T11:12:26 update
-
-# 2025-04-09T13:39:45 update
-
-# 2025-08-07T15:56:14 update
-
-# 2025-08-20T10:41:17 update
-
-# 2025-10-16T17:51:05 update
-
-# 2025-10-16T14:29:07 update
-
-# 2025-12-05T13:05:17 update
-
-# 2025-12-12T09:49:47 update
-
-# 2025-12-19T13:59:03 update
-
-# 2026-01-13T16:00:24 update
-
-# 2026-02-05T14:23:35 update
-
-# 2026-03-13T08:25:05 update
-
-# 2026-04-23T12:24:44 update
-
-# 2026-05-18T20:56:34 update
