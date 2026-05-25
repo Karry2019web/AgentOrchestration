@@ -8,9 +8,10 @@ from urllib.error import HTTPError
 
 
 class OrchestratorClient:
-    def __init__(self, base_url: str = None, api_key: str = None):
+    def __init__(self, base_url: str = None, api_key: str = None, timeout: int = 30):
         self.base_url = base_url or os.getenv("AO_API_URL", "https://api.agent-orchestrator.io")
         self.api_key = api_key or os.getenv("AO_API_KEY", "")
+        self.timeout = timeout
         self._session = None
 
     def _request(self, method: str, path: str, data: Dict = None) -> Dict:
@@ -23,7 +24,7 @@ class OrchestratorClient:
         req = Request(url, data=body, headers=headers, method=method)
 
         try:
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=self.timeout) as resp:
                 return json.loads(resp.read().decode())
         except HTTPError as e:
             return {"error": e.code, "message": e.reason}
@@ -52,6 +53,7 @@ class OrchestratorClient:
 
     def stop_agent(self, agent_id: str) -> Dict:
         return self._request("POST", f"/agents/{agent_id}/stop")
+
 
 # 2019-01-22T18:13:52 update
 
@@ -158,3 +160,4 @@ class OrchestratorClient:
 # 2026-05-11T08:44:28 update
 
 # 2026-05-14T13:49:57 update
+
