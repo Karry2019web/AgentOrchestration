@@ -2,7 +2,8 @@
 
 import time
 import logging
-from typing import Callable
+from typing import Callable, Optional
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -17,6 +18,33 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if not token.startswith("Bearer "):
                 return Response(status_code=401, content="Unauthorized")
         return await call_next(request)
+
+
+class CacheControlMiddleware(BaseHTTPMiddleware):
+    """Set Cache-Control: no-store on authenticated JSON responses.
+
+    Prevents sensitive orchestration data from being cached by proxies or browsers.
+    Applied after the response is generated so it cannot be skipped on any code path.
+    """
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        response = await call_next(request)
+
+        # Only apply to authenticated requests
+        auth_header = request.headers.get("Authorization", "")
+        has_session = request.headers.get("Cookie", "").startswith("session=")
+        if not auth_header.startswith("Bearer ") and not has_session:
+            return response
+
+        # Only apply to JSON responses (application/json or any variant)
+        content_type = response.headers.get("content-type", "")
+        if "json" not in content_type.lower():
+            return response
+
+        # Set cache-control to prevent caching of sensitive data
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        return response
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -177,3 +205,4 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 # 2026-03-27T12:58:53 update
 
 # 2026-05-12T17:19:36 update
+
