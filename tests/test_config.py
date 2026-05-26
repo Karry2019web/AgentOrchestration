@@ -24,6 +24,47 @@ class TestConfig:
         config.set("a.b.c.d", "value")
         assert config.get("a.b.c.d") == "value"
 
+
+    def test_reject_empty_key(self):
+        config = Config()
+        with pytest.raises(ValueError, match="key cannot be empty"):
+            config.get("")
+
+    def test_reject_empty_key_on_set(self):
+        config = Config()
+        with pytest.raises(ValueError, match="key cannot be empty"):
+            config.set("", "value")
+
+    def test_reject_consecutive_dots(self):
+        config = Config()
+        with pytest.raises(ValueError, match="consecutive dots"):
+            config.get("a..b")
+
+    def test_reject_consecutive_dots_on_set(self):
+        config = Config()
+        with pytest.raises(ValueError, match="consecutive dots"):
+            config.set("a..b", "value")
+
+    def test_reject_leading_dot(self):
+        config = Config()
+        with pytest.raises(ValueError, match="start or end with a dot"):
+            config.get(".key")
+
+    def test_reject_trailing_dot(self):
+        config = Config()
+        with pytest.raises(ValueError, match="start or end with a dot"):
+            config.get("key.")
+
+    def test_accept_valid_dotted_key(self):
+        config = Config()
+        config.set("a.b.c", "value")
+        assert config.get("a.b.c") == "value"
+
+    def test_accept_valid_key_with_single_segment(self):
+        config = Config()
+        config.set("key", "value")
+        assert config.get("key") == "value"
+
     def test_to_dict(self):
         config = Config()
         config.set("key1", "value1")

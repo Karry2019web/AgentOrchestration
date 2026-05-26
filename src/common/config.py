@@ -23,6 +23,14 @@ class Config:
                 config_key = key[len(prefix):].lower().replace("_", ".")
                 self._set_nested(config_key, value)
 
+    def _validate_key(self, key: str) -> None:
+        if not key:
+            raise ValueError("Config key cannot be empty")
+        if key.startswith(".") or key.endswith("."):
+            raise ValueError(f"Config key cannot start or end with a dot: {key!r}")
+        if ".." in key:
+            raise ValueError(f"Config key cannot contain consecutive dots: {key!r}")
+
     def _set_nested(self, key: str, value: Any) -> None:
         parts = key.split(".")
         current = self._data
@@ -33,6 +41,7 @@ class Config:
         current[parts[-1]] = value
 
     def get(self, key: str, default: Any = None) -> Any:
+        self._validate_key(key)
         parts = key.split(".")
         current = self._data
         for part in parts:
@@ -45,6 +54,7 @@ class Config:
         return current
 
     def set(self, key: str, value: Any) -> None:
+        self._validate_key(key)
         self._set_nested(key, value)
 
     def to_dict(self) -> Dict:
